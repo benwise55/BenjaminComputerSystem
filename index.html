@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CFB Ratings</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <h1>CFB Ratings</h1>
+    <nav role="tablist">
+      <button role="tab" data-view="rankings" aria-selected="true">Rankings</button>
+      <button role="tab" data-view="weekly">Predictions</button>
+      <button role="tab" data-view="predictor">Matchup</button>
+      <button role="tab" data-view="players">Players</button>
+    </nav>
+    <label class="season">Season <select id="season"></select></label>
+  </header>
+
+  <main>
+    <section id="rankings" class="view">
+      <div class="controls">
+        <input id="team-search" type="search" placeholder="Search teams">
+        <select id="division" aria-label="Division">
+          <option value="FBS">FBS</option>
+          <option value="FCS">FCS</option>
+          <option value="">FBS and FCS</option>
+        </select>
+        <select id="conference"><option value="">All conferences</option></select>
+      </div>
+      <p class="note" id="rankings-note"></p>
+      <div class="table-wrap"><table id="rankings-table"></table></div>
+    </section>
+
+    <section id="weekly" class="view" hidden>
+      <div class="controls">
+        <label>Week <select id="weekly-week"></select></label>
+        <select id="weekly-division" aria-label="Division">
+          <option value="FBS">FBS Only</option>
+          <option value="">All Divisions</option>
+        </select>
+        <input id="weekly-search" type="search" placeholder="Search teams or conference">
+      </div>
+      <p class="note" id="weekly-note"></p>
+      <div class="table-wrap"><table id="weekly-table"></table></div>
+    </section>
+
+    <section id="predictor" class="view" hidden>
+      <div class="matchup">
+        <label>Team A
+          <span class="combo">
+            <input id="team-a" type="search" role="combobox" aria-expanded="false" aria-autocomplete="list"
+                   aria-controls="team-a-list" autocomplete="off" placeholder="Search teams">
+            <ul id="team-a-list" class="options" role="listbox" hidden></ul>
+          </span>
+        </label>
+        <label>Where
+          <select id="site">
+            <option value="a">at Team A</option>
+            <option value="neutral">Neutral site</option>
+            <option value="b">at Team B</option>
+          </select>
+        </label>
+        <label>Team B
+          <span class="combo">
+            <input id="team-b" type="search" role="combobox" aria-expanded="false" aria-autocomplete="list"
+                   aria-controls="team-b-list" autocomplete="off" placeholder="Search teams">
+            <ul id="team-b-list" class="options" role="listbox" hidden></ul>
+          </span>
+        </label>
+      </div>
+      <div id="prediction"></div>
+      <p class="note" id="predictor-note"></p>
+    </section>
+
+    <section id="players" class="view" hidden>
+      <div class="controls">
+        <div class="segmented" id="player-kind">
+          <button data-kind="passing" aria-pressed="true">Passing</button>
+          <button data-kind="rushing">Rushing</button>
+          <button data-kind="receiving">Receiving</button>
+          <button data-kind="defense">Defense</button>
+        </div>
+        <input id="player-search" type="search" placeholder="Search player or team">
+        <label class="min">Min <input id="player-min" type="number" min="0" step="10"> <span id="player-min-label"></span></label>
+      </div>
+      <div class="table-wrap"><table id="players-table"></table></div>
+    </section>
+  </main>
+
+  <footer>
+    Rating is the average of two models, in points per game against an average FBS team: opponent-adjusted expected points added (EPA), and a play-success Elo built on Season_Analyzer.py's Elo (fixed), which scores each game by the share of plays each team won.
+    Data: NCAA play-by-play via sportsdataverse, scores via ESPN.
+  </footer>
+  <script src="score.js"></script>
+  <script src="script.js"></script>
+  <script src="charts.js"></script>
+  <script src="value.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

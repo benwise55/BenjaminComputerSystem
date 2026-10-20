@@ -3,11 +3,13 @@
 //
 // The two bet types sit on very different footings, so they are answered differently.
 //
-// Against the spread there is no measured edge. Fitted on the 1,550 FBS-vs-FBS games of 2024-25
-// that carry a closing line, the chance of covering rises 0.0198 in log-odds per point of
-// disagreement with the line, and that slope's 95% interval, +0.0004 to +0.0391, only just clears
-// zero. Every honest answer here is therefore an interval, and at any realistic edge that interval
-// straddles break-even. A single number would be reporting noise as a forecast.
+// Against the spread there is a measured signal and no measured edge, which are different things.
+// Over the 9,846 games since 2014 that carry a closing line, the chance of covering rises 0.077 in
+// log-odds per point of disagreement with the line - measured out of season, so it is what the page
+// will really do - and that slope's 95% interval, +0.023 to +0.131, clears zero. But the picks it
+// makes land at 51.5%, where -110 needs 52.4%. Every honest answer here is therefore an interval,
+// and at any realistic edge that interval straddles break-even. A single number would be reporting
+// a real but insufficient signal as a forecast.
 //
 // The moneyline is firmer. Over 3,348 games the composite is the sharper forecast by some way -
 // Brier 0.1655 against the old EPA + success-Elo blend's 0.1869 - and it is now calibrated: the
@@ -16,21 +18,37 @@
 // on the season it was not fitted on that lands at 1.007, which is as close to honest as this
 // sample can measure. The probability can therefore be priced directly.
 
-// Refitted on the margin mix, which is what the page now disagrees with the line by. The slope is
-// all but unchanged from the old EPA + success-Elo fit (0.0198 against 0.0202 per point), but the
-// intercept comes back to zero: the old basis leaned about three quarters of a point towards the
-// home side at a zero edge, and this one does not.
+// Refitted on the conference-split cover fit, which is what the page now disagrees with the line
+// by. Two things changed, and they pull in opposite directions.
+//
+// The basis is better. The page no longer scores a margin blend against the line; it predicts the
+// COVER from the models and the line together, split by whether the two sides share a conference
+// (see ATS_COVER in app.js). Fitted that way the sample is the whole 2014-26 record carrying a
+// closing line, 9,846 games rather than 1,550, and the slope is four times the old one per point -
+// but the points themselves are far smaller, because a fit allowed to shrink toward the market
+// does exactly that. Half of all games now disagree with the line by under 0.7 points.
+//
+// The honest slope is smaller than the fitted one. Scored in sample the slope is 0.1139; this is
+// 0.0773, from predicting each season with coefficients fitted on the OTHER seasons, which is what
+// a visitor to this page actually gets. The in-sample figure is half again as large, and that gap
+// is the cost of fitting five coefficients per partition.
+//
+// What this fit does and does not establish. The ordering is real: t = +2.8, and the interval
+// +0.023 to +0.131 clears zero, so games the fit disagrees with the line about really do cover more
+// often. The level is not enough: held out, its picks land at 51.5% against the 52.4% a -110 bet
+// needs, about two standard errors short. So every answer here is an interval and every interval
+// straddles break-even, which is the truthful shape of the result rather than a hedge.
 const ATS_FIT = {
-  intercept: -0.00558,
-  slope: 0.019760,
-  cov: [[0.00258852, 0.00001014], [0.00001014, 0.00009709]],
-  games: 1550,
-  seasons: '2024-25',
-  // half the fitted games sit inside 2.8 points of the line and 95% inside 9.8. Past that the
+  intercept: -0.00724,
+  slope: 0.077259,
+  cov: [[0.00095940, -0.00064609], [-0.00064609, 0.00075559]],
+  games: 9846,
+  seasons: '2014-26',
+  // half the fitted games sit inside 0.7 points of the line and 95% inside 2.25. Past that the
   // curve is extrapolating, and its interval understates the doubt because it assumes the
   // logistic shape keeps holding out there.
-  p95: 9.8,
-  beyondP95: 78,
+  p95: 2.25,
+  beyondP95: 493,
 };
 
 // Totals, tested over 2,767 games by predicting each season with the PREVIOUS season's parameters

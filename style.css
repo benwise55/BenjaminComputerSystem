@@ -179,3 +179,39 @@ footer { color: var(--muted); font-size: 12px; padding: 24px; max-width: 1200px;
   .team-card .logo { width: 40px; height: 40px; }
   .team-card .name { font-size: 16px; }
 }
+
+/* Injury report on the matchup page. Status is carried by a word as well as a colour, because
+   the two that matter mean very different things and colour alone would not say which. */
+.injuries { margin-top: 24px; border-top: 1px solid var(--border); padding-top: 16px; }
+.injuries h3 { margin: 0 0 12px; font-size: 15px; }
+.injury-src { color: var(--muted); font-weight: 400; font-size: 12px; margin-left: 8px; }
+.injury-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+.injuries h4 { margin: 0 0 8px; font-size: 13px; }
+.injury-tally { color: var(--muted); font-weight: 400; font-size: 12px; margin-left: 6px; }
+.injury-list { list-style: none; margin: 0; padding: 0; }
+.injury-list li {
+  display: grid; grid-template-columns: auto 1fr auto; gap: 2px 8px; align-items: baseline;
+  padding: 6px 0 6px 10px; border-left: 3px solid var(--border); margin-bottom: 4px;
+}
+.injury-list li.out { border-left-color: var(--bad); }
+.injury-list li.doubtful { border-left-color: #c98a00; }
+.injury-list li.questionable { border-left-color: var(--muted); }
+.injury-status {
+  font-size: 10px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase;
+  padding: 1px 6px; border-radius: 3px; white-space: nowrap;
+}
+.out .injury-status { background: rgba(179, 38, 30, .14); color: var(--bad); }
+.doubtful .injury-status { background: rgba(201, 138, 0, .16); color: #96670a; }
+.questionable .injury-status { background: rgba(107, 107, 112, .15); color: var(--muted); }
+.injury-name { font-weight: 600; }
+.injury-pos { color: var(--muted); font-size: 12px; }
+.injury-impact { grid-column: 2 / -1; font-size: 12px; color: var(--text); font-variant-numeric: tabular-nums; }
+.injury-impact.none { color: var(--muted); font-style: italic; }
+.injury-note { grid-column: 2 / -1; font-size: 11px; color: var(--muted); }
+.injury-none { color: var(--muted); font-size: 13px; margin: 0; }
+.injury-caveat { color: var(--muted); font-size: 11px; line-height: 1.5; margin: 14px 0 0; }
+@media (max-width: 700px) { .injury-cols { grid-template-columns: 1fr; } }
+.injury-stale {
+  font-size: 11px; font-weight: 600; color: #96670a; background: rgba(201, 138, 0, .16);
+  padding: 1px 6px; border-radius: 3px; margin-left: 6px;
+}

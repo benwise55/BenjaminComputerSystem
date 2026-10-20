@@ -151,11 +151,20 @@ function callShift(L, down, toGo, toGoal, margin, quarter) {
   return g;
 }
 
-function passChance(L, mods, down, toGo, margin, quarter, homeSign, homeTerms, toGoal, endPass = 0) {
+function passChance(L, mods, down, toGo, margin, quarter, homeSign, homeTerms, toGoal, endPass = 0, dmods = null) {
   const base = L.pass_intercept + (down >= 2 ? L.pass_base[down - 2] : 0) + (quarter >= 2 ? L.pass_base[quarter + 1] : 0);
+  // the red zone runs more than the free field does; see GOAL_PASS_SHIFT in game_script.py
+  const goalMax = (L.bins && L.bins.goal_max) || 20;
+  const near = toGoal != null && toGoal <= goalMax;
+  // the red-zone call answers to the defence: -(run_d + completion_d), bigger meaning a better
+  // defence, which real offences respond to by throwing MORE. See GOAL_PASS_DEFENSE.
+  const goalPass = near
+    ? GOAL_PASS_SHIFT - GOAL_PASS_DEFENSE * ((dmods?.run_d ?? 0) + (dmods?.completion_d ?? 0)
+                                             + (mods?.run_o ?? 0) + (mods?.completion_o ?? 0))
+    : 0;
   return logistic(base + aggression(L, down, toGo, margin, quarter) + (mods.pass ?? 0)
                   + homeSign * (homeTerms.pass ?? 0) + callShift(L, down, toGo, toGoal, margin, quarter)
-                  + endPass);
+                  + goalPass + endPass);
 }
 
 function fourthProbabilities(L, toGoal, toGo, margin, quarter) {
@@ -191,8 +200,88 @@ function onsideChance(L, margin, quarter) {
   return trailing <= 8 ? r.q4_1 : (trailing <= 16 ? r.q4_9 : r.q4_17);
 }
 
+// WEATHER. Mirrors game_script.py and must be kept in step with it. Each term applies only when
+// the dashboard data actually carries that field for the game: schedule.json gets temp, wind and
+// wet from the line table, which holds observed weather for played games and a forecast about a
+// week past whenever the file was fetched. A game with no entry is simulated with no weather
+// adjustment at all rather than a league-average one.
+//
+// Temperature's 3/5-2/5 defence/offence shares collapse to their sum here, because both teams play
+// in the same weather - see the note at TEMP_DEF_SHARE in game_script.py - so what is left is a
+// single shift per degree. Same for precipitation, which is an added defensive term rather than a
+// multiplier (the multiplier was tested and is not in the data), and is a wet/dry step with no
+// depth. Wind is split by channel instead: a measured field-goal slope and a calibrated
+// incompletion slope.
+const TEMPERATURE = true;
+const TEMP_REFERENCE_F = 66.1;
+const TEMP_TERMS_PER_DEGREE = 0.0008;
+const TEMP_MODELS = ['run', 'completion'];
+
+const WIND = true;
+const WIND_REFERENCE_MPH = 7.7;
+const WIND_FG_LOGIT_PER_MPH = -0.01001;   // measured on 11,164 attempts, holding kick distance
+const WIND_INCOMPLETE_PER_MPH = 0.00957;  // calibrated so the pair totals -0.1626 points a mph
+
+const PRECIPITATION = true;
+const PRECIP_MODELS = ['run', 'completion'];
+// Calibrated by calibrate_precip() to the -2.057 combined points a wet game was fitted at; the
+// response is linear in the scale (-80.5, -82.4, -80.7 points per unit across three trials).
+const PRECIP_DEF_TERMS = 0.02536;
+
+// TRAVEL. Door-to-door hours the visitor spent getting there, 3/5 of the effect on its defence and
+// 2/5 on its offence. Unlike the weather terms these shares DO bite, because only one side travels
+// (both do at a neutral site), so the two land on different teams and oppose each other in the
+// differential - see the note at TRAVEL_DEF_SHARE in game_script.py.
+//
+// The hours are precomputed into schedule.json by build_dashboard_data.travel_map, which calls
+// game_script's own travel_hours and _great_circle. The trip model has a coach/flight switch in it
+// and a second copy here could drift from the Python without failing loudly, so only the answer
+// crosses over. A game whose venue could not be placed carries no travel field and gets no term.
+//
+// The gradient was retargeted from 0.409 to 0.290 points an hour once the home term was fitted
+// net of travel: 0.409 came from home-field-OFF residuals and carried home advantage inside it.
+// 0.00568 is verified against the model, delivering 0.2922.
+const TRAVEL_HOURS = true;
+const TRAVEL_DEF_SHARE = 0.60;
+const TRAVEL_OFF_SHARE = 0.40;
+const TRAVEL_TERMS_PER_HOUR = 0.00568;
+const TRAVEL_MODELS = ['run', 'completion'];
+
+// REST, as a differential and capped at 14 days. Same shape as travel: the offence is hurt by its
+// own deficit and helped by its opponent's, so two equally rested teams cancel exactly - which is
+// what the data shows (every matched-rest group produces the same total to within 0.02 points).
+//
+// The deficit is days SHORT of the cap, computed per team before any differencing, so a 30-day
+// bowl layoff and a 15-day one are both zero and read as identical. Capping the difference instead
+// of each side would hand 30-versus-25 a five-day advantage out of nothing.
+//
+// Shares are measured, not assumed: 0.0663 points a day scored against 0.0698 conceded, so 49/51.
+// They are not distinguishable from even, nor from travel's 40/60.
+// KICKING BY LEVEL. fg_good applied one league curve to everyone, so the simulator made 70.9% of
+// its kicks whoever kicked, against a real range of 0.683 for FCS to 0.756 for Power. The attempt
+// side is separate - the fourth-down choice reads a league model and never consults fg_good - so
+// weak kicking teams were also sent out too often and from too far.
+//
+// Fitted on 2021-2025 only: a curve on 2014-2020 makes 0.540 from 45 yards against 0.590 since,
+// and mean attempt distance rose 34.4 -> 36.1 yards, so the eras are different games.
+//
+// By LEVEL rather than by team, which is measured: distance-adjusted field goals over expected
+// persist year to year at r = +0.19 across teams, but only r = +0.090 once the level mean is
+// removed. A per-team kicker term would be fitting noise.
+//
+// Centred on the attempt-weighted mean, so the league rate is unchanged and only its split moves.
+const FG_SKILL = { fbs: 0.2014, fcs: -0.2580, other: -0.5754 };
+const FG_ATTEMPT_SKILL = { fbs: 0.1697, fcs: -0.1740, other: -0.7969 };
+
+const REST = true;
+const REST_CAP_DAYS = 14.0;
+const REST_OFF_SHARE = 0.49;
+const REST_DEF_SHARE = 0.51;
+const REST_TERMS_PER_DAY = 0.00272;
+const REST_MODELS = ['run', 'completion'];
+
 class ScriptGame {
-  constructor(data, mods, home) {
+  constructor(data, mods, home, conditions) {
     this.L = data.league;
     this.homeTerms = data.home || {};
     // a per-game, per-side draw on the two yardage shifts: an offence that simply has a good day.
@@ -216,13 +305,52 @@ class ScriptGame {
     // a thin band borrows the nearest well-filled one, as the Python does
     this.punts = filledBands(this.L.punt_to);
     this.ints = filledBands(this.L.int_to);
-    this.penalty = { noplay: sampler(this.L.penalties.noplay), add: sampler(this.L.penalties.add) };
+    // one sampler per field-position bin; see PENALTY_FIELD_BINS in game_script.py
+    this.penalty = { noplay: this.L.penalties.noplay.map(sampler), add: this.L.penalties.add.map(sampler) };
     // both teams shift the penalty rate and neither changes during the game, so shift it once
     const penShift = (this.mods[0].penalty ?? 0) + (this.mods[1].penalty ?? 0);
     this.pen = penShift
       ? { noplay: logistic(logit(this.L.pen_noplay) + penShift), add: logistic(logit(this.L.pen_add) + penShift) }
       : { noplay: this.L.pen_noplay, add: this.L.pen_add };
+    // null when the dashboard has no value for this game, which is how a future game beyond the
+    // forecast horizon ends up with no weather effect rather than a guessed one.
+    const wx = conditions || {};
+    this.chill = (TEMPERATURE && wx.temp != null) ? TEMP_REFERENCE_F - wx.temp : null;
+    this.gust = (WIND && wx.wind != null) ? wx.wind - WIND_REFERENCE_MPH : null;
+    this.wet = (PRECIPITATION && wx.wet != null) ? wx.wet : null;
+    // [hours team 0 travelled, hours team 1 travelled], already oriented to mods by the caller
+    this.travel = (TRAVEL_HOURS && Array.isArray(wx.travel) && wx.travel.length === 2
+                   && wx.travel.some((h) => h)) ? wx.travel : null;
+    // [team 0 deficit, team 1 deficit] in days, already oriented to mods by the caller. Unlike
+    // travel a pair of zeros is meaningful (both fully rested), but it also has no effect, so
+    // gating on "some non-zero" costs nothing and skips the arithmetic.
+    this.rest = (REST && Array.isArray(wx.rest) && wx.rest.length === 2
+                 && wx.rest.some((v) => v)) ? wx.rest : null;
     this.off = 0; this.def = 1;
+  }
+
+  // One place for the field-goal chance so the wind term cannot reach one kick site and miss the
+  // other - the fourth-down choice and the end-of-half attempt both come through here.
+  // fbs, fcs or other for one side; script.json carries it as a team field
+  level(team) {
+    const m = this.mods[team];
+    return m ? m.level : null;
+  }
+
+  fgChance(toGoal) {
+    // quadratic in kick length about 40 yards; a cache written before PARAMS_VERSION 45 holds
+    // two coefficients and is read as a straight line. See fit() in game_script.py.
+    const c = this.L.fg_logit, length = toGoal + 17;
+    let z = c[0] + c[1] * length + (c.length > 2 ? c[2] * (length - 40) ** 2 : 0)
+            + (FG_SKILL[this.level(this.off)] ?? 0);
+    if (WIND && this.gust !== null && WIND_FG_LOGIT_PER_MPH) z += WIND_FG_LOGIT_PER_MPH * this.gust;
+    return logistic(z);
+  }
+
+  // mph above the reference, or 0 when this game has no wind reading
+  windInc() {
+    return (WIND && this.gust !== null && WIND_INCOMPLETE_PER_MPH)
+      ? WIND_INCOMPLETE_PER_MPH * this.gust : 0;
   }
 
   sign(team) { return this.home === null ? 0 : (team === this.home ? 1 : -1); }
@@ -233,8 +361,26 @@ class ScriptGame {
   shift(model) {
     const o = this.mods[this.off], d = this.mods[this.def];
     const shock = (this.shock && (model === 'run' || model === 'completion')) ? this.shock[this.off] : 0;
-    return (o[`${model}_o`] ?? 0) + (d[`${model}_d`] ?? 0) + (this.intercepts[model] ?? 0) + shock
-           + this.sign(this.off) * (this.homeTerms[model] ?? 0);
+    let value = (o[`${model}_o`] ?? 0) + (d[`${model}_d`] ?? 0) + (this.intercepts[model] ?? 0)
+                + shock + this.sign(this.off) * (this.homeTerms[model] ?? 0);
+    // both shares act on the same chill and add, so only their sum (1.0) reaches the simulation
+    if (this.chill !== null && TEMP_TERMS_PER_DEGREE && TEMP_MODELS.includes(model)) {
+      value -= TEMP_TERMS_PER_DEGREE * this.chill;
+    }
+    if (this.wet && PRECIP_DEF_TERMS && PRECIP_MODELS.includes(model)) {
+      value -= PRECIP_DEF_TERMS;
+    }
+    // the offence is hurt by its own trip and helped by its opponent's, so only the difference
+    // tells and a neutral site where both sides travel needs no special case
+    if (this.travel && TRAVEL_TERMS_PER_HOUR && TRAVEL_MODELS.includes(model)) {
+      value += TRAVEL_TERMS_PER_HOUR * (TRAVEL_DEF_SHARE * this.travel[this.def]
+                                        - TRAVEL_OFF_SHARE * this.travel[this.off]);
+    }
+    if (this.rest && REST_TERMS_PER_DAY && REST_MODELS.includes(model)) {
+      value += REST_TERMS_PER_DAY * (REST_DEF_SHARE * this.rest[this.def]
+                                     - REST_OFF_SHARE * this.rest[this.off]);
+    }
+    return value;
   }
 
   fromBand(map, toGoal) {
@@ -249,24 +395,37 @@ class ScriptGame {
     const L = this.L;
     const spread = this.shift('run_spread');
     const [goalRun, goalSack] = this.goalShift(toGoal);
+    // the two goal-line corrections game_script.py fits by simulation: interceptions do not fall
+    // near the end zone in reality even though aggression does, and a completion reaches the end
+    // zone slightly less often than the free-field yardage draw implies
+    const goalMax = (L.bins && L.bins.goal_max) || 20;   // GOAL_MAX, as goalShift reads it
+    const near = toGoal != null && toGoal <= goalMax;
+    const goalInt = near ? GOAL_INT_LOGIT : 0;
+    const goalComp = near ? GOAL_COMPLETION_SHIFT : 0;
     const [fieldShift, fieldSpread, fieldInc] = this.passFieldShift(toGoal);
     if (Math.random() >= passChance(L, this.mods[this.off], down, toGo, margin, quarter,
-                                    this.sign(this.off), this.homeTerms, toGoal, this.endShift(left, 'pass'))) {
-      return ['run', this.run(this.shift('run') + this.runShift(down, toGo) + goalRun, spread)];
+                                    this.sign(this.off), this.homeTerms, toGoal, this.endShift(left, 'pass'),
+                                    this.mods[this.def])) {
+      return ['run', this.atMarker(down, toGo, toGoal, this.shortLoss(toGo,
+                                   this.run(this.shift('run') + this.runShift(down, toGo) + goalRun, spread)))];
     }
-    // third down is the only down whose passing moves with the distance to gain: sacks roughly
-    // double from a yard to ten, completions fall, and a catch gains more. Zeros anywhere else.
+    // second and third down each carry their own curve in the distance to gain - sacks roughly
+    // double from a yard to ten, completions fall, and a catch gains more. First and fourth get
+    // zeros; see DOWN_PASS_KEY in game_script.py for why first down has none.
     const [incShift, sackShift, gainShift] = this.thirdShift(down, toGo);
     const u = Math.random();
-    const incomplete = logistic(logit(L.incomplete) + this.shift('incomplete') + incShift + fieldInc);
+    const incomplete = logistic(logit(L.incomplete) + this.shift('incomplete') + incShift
+                                + fieldInc + this.windInc());
     if (u < incomplete) return ['incomplete', 0];
     const [ia, ik] = L.turnover_logit.interception;
-    const intercept = logistic(ia + ik * aggression(L, down, toGo, margin, quarter) + this.shift('interception'));
+    const intercept = logistic(ia + ik * aggression(L, down, toGo, margin, quarter) + this.shift('interception')
+                               + INTERCEPTION_LOGIT + goalInt);
     if (u < incomplete + intercept) return ['interception', 0];
     if (Math.random() < logistic(logit(L.sack) + this.shift('sack') + sackShift + goalSack)) {
       return ['sack', Math.round(L.sack_mean + gauss() * L.sack_sd)];
     }
-    return ['complete', this.completion(this.shift('completion') + gainShift + fieldShift, fieldSpread)];
+    return ['complete', this.atMarker(down, toGo, toGoal,
+                                      this.completion(this.shift('completion') + gainShift + fieldShift + goalComp, fieldSpread))];
   }
 
   // A run's yardage moves with the down and the distance, and the league curve on its own made
@@ -312,16 +471,66 @@ class ScriptGame {
   }
 
   thirdShift(down, toGo) {
-    const t = this.L.third;
-    if (down !== 3 || !t) return [0, 0, 0];
+    const t = this.L[DOWN_PASS_KEY[String(Math.trunc(down))]];
+    if (!t) return [0, 0, 0];
     const i = Math.min(Math.max(Math.trunc(toGo), 1), t.incomplete.length) - 1;
     return [t.incomplete[i], t.sack[i], t.gain[i]];
   }
 
+  shortLoss(toGo, yards) {
+    if (!SHORT_LOSS_SCALE || toGo > SHORT_LOSS_TO_GO || yards >= 0) return yards;
+    const v = yards * SHORT_LOSS_SCALE, low = Math.floor(v);
+    return low + (Math.random() < v - low ? 1 : 0);
+  }
+
+  atMarker(down, toGo, toGoal, yards) {
+    const mix = markerMix(down, toGo);
+    if (mix && toGoal != null && toGoal >= toGo + MARKER_CLEAR && Math.random() < mix) {
+      // MARKER_WEIGHTS were measured off RECORDED yardage, so the dip at the sticks is already
+      // inside them and atSticks would count it a second time.
+      const u = Math.random();
+      let i = 0;
+      while (i < MARKER_CUM.length - 1 && MARKER_CUM[i] < u) i++;
+      return Math.trunc(toGo) + MARKER_BAND[i];
+    }
+    return this.atSticks(toGo, toGoal, yards);
+  }
+
+  // A gain landing exactly on the line to gain is written a yard short or a yard long more often
+  // than it is written where it fell - a scoring convention, present on every down at every
+  // distance. See STICKS_SHORT in game_script.py for the measurement and why it matters.
+  atSticks(toGo, toGoal, yards) {
+    if ((!STICKS_SHORT && !STICKS_LONG) || yards !== Math.trunc(toGo)
+        || toGoal == null || toGoal < toGo + STICKS_CLEAR) return yards;
+    const u = Math.random();
+    if (u < STICKS_SHORT) return yards - 1;
+    if (u < STICKS_SHORT + STICKS_LONG) return yards + 1;
+    return yards;
+  }
+
   drawPenalty(kind, toGoal) {
-    const [net, auto] = this.penalty[kind]();
-    const capped = net > 0 ? Math.min(net, Math.floor(toGoal / 2)) : Math.max(net, -Math.floor((100 - toGoal) / 2));
-    return [capped, !!auto];
+    // NO HALF-DISTANCE CAP, matching game_script.Game.penalty. pen_events holds the REALIZED net
+    // of real penalties, so the real half-distance rule is already inside every number; capping
+    // again truncates an already-truncated distribution and can only shrink it - 6.4% of mean
+    // yardage at a typical field position, where the simulator was only 7.6% short to begin with.
+    // This file carried the old cap for the whole life of the python fix, so the dashboard threw
+    // shorter penalties than every backtest measured. What remains is the physical bound: the
+    // ball cannot cross either goal line.
+    // The event carries P(automatic first down) rather than the flag; see _penalty_events in
+    // game_script.py. Draw it per play, and redraw a net that will not fit instead of clipping -
+    // clipping truncates an already-truncated distribution and cost 3.25% of the yardage.
+    const spot = Math.min(Math.max(Math.trunc(toGoal), 1), 99);
+    let b = 0;
+    while (b < PENALTY_FIELD_BINS.length && PENALTY_FIELD_BINS[b] < spot) b++;
+    const draw = this.penalty[kind][b];
+    const fits = (v) => (v > 0 ? v <= toGoal - 1 : v >= -(99 - toGoal));
+    let net = 0, pAuto = 0;
+    for (let i = 0; i < PENALTY_DRAW_TRIES; i++) {
+      [net, pAuto] = draw();
+      if (fits(net)) break;
+    }
+    if (!fits(net)) net = net > 0 ? Math.min(net, toGoal - 1) : Math.max(net, -(99 - toGoal));
+    return [net, Math.random() < pAuto];
   }
 
   // one possession: returns [outcome, the other team's own yard line or null, snaps left]
@@ -338,6 +547,17 @@ class ScriptGame {
         if (kick && fg > 0 && fg < 1) {
           const now = logistic(logit(fg) + kick);
           punt *= (1 - now) / (1 - fg); go *= (1 - now) / (1 - fg); fg = now;
+        }
+        // The kicking team's level, taken FROM PUNT FIRST rather than proportionally out of punt
+        // and go together: only punt is over-predicted. See FG_ATTEMPT_SKILL in game_script.py
+        // for the measurement. Punt covers what it can and go covers the rest, which only binds
+        // near the goal line where there is no punt left to take.
+        const skill = FG_ATTEMPT_SKILL[this.level(team)] ?? 0;
+        if (skill && fg > 0 && fg < 1) {
+          const now = logistic(logit(fg) + skill);
+          const take = now - fg;
+          const fromPunt = take > 0 ? Math.min(take, punt) : 0;
+          punt -= fromPunt; go -= take - fromPunt; fg = now;
         }
         const lean = this.mods[team].go ?? 0;
         if (lean && go > 0 && go < 1) {
@@ -358,8 +578,7 @@ class ScriptGame {
           return ['punt', spot, left];
         }
         if (choice === 'fg') {
-          const [a, k] = L.fg_logit;
-          if (Math.random() < logistic(a + k * (toGoal + 17))) return ['fg', 25, left];
+          if (Math.random() < this.fgChance(toGoal)) return ['fg', 25, left];
           return ['missed_fg', Math.max(20, toGoal), left];
         }
       }
@@ -386,7 +605,8 @@ class ScriptGame {
         }
       }
       let auto = false;
-      if (yards > -(100 - toGoal) && yards < toGoal && Math.random() < this.pen.add / (1 - this.pen.noplay)) {
+      // divide out the share of snaps this gate skips; see pen_add_eligible in game_script.py
+      if (yards > -(100 - toGoal) && yards < toGoal && Math.random() < this.pen.add / (1 - this.pen.noplay) / (this.L.pen_add_eligible || 1)) {
         const drawn = this.drawPenalty('add', toGoal - yards);
         yards += drawn[0]; auto = drawn[1];
       }
@@ -408,8 +628,7 @@ class ScriptGame {
       const trailing = this.score[1 - team] - this.score[team];
       const halftime = this.halfNo === 0;
       if ((halftime || (trailing >= 0 && trailing <= 3)) && toGoal <= LAST_KICK_TO_GOAL) {
-        const [a, k] = L.fg_logit;
-        if (Math.random() < logistic(a + k * (toGoal + 17))) return ['fg', 25, left];
+        if (Math.random() < this.fgChance(toGoal)) return ['fg', 25, left];
         return ['missed_fg', Math.max(20, toGoal), left];
       }
     }
@@ -509,8 +728,8 @@ class ScriptGame {
 //
 // What is left of the margin being too small once TEAM_PRIOR_PLAYS stopped over-shrinking it.
 // Refitted at 100 sims on 9,307 FBS-vs-FBS walk-forward games, 2014-2026, with the prior at 70:
-// 1.272 in weeks 1-2 (t = 4.35), 1.119 in weeks 3-4 (5.28) and 1.063 from week 9 (3.08). Weeks 5-8
-// are now 0.971 at t = -0.44 and bowls 0.955 at -0.67, so neither is corrected - a quarter of the
+// 1.369 in weeks 1-2 (t = 6.23), 1.124 in weeks 3-4 (5.63) and 1.056 from week 9 (2.80). Weeks 5-8
+// are now 0.966 at t = -0.83 and bowls 0.814 at -1.92, so neither is corrected - a quarter of the
 // season needs no gain at all, which is the model being right rather than patched.
 //
 // These are fitted at 100 sims because predictor noise attenuates the slope and that noise depends
@@ -527,7 +746,43 @@ class ScriptGame {
 // which differs from blendWeights treating a missing week as late season; the predictions table
 // always has one, so this only bites on a caller that does not.
 const MARGIN_GAIN = true;
-const MARGIN_GAIN_WEEKS = [[2, 1.272], [4, 1.119], [8, 1.000], [99, 1.063]];
+// refitted 2026-10-10 at PARAMS_VERSION 31, 100 sims, 9,310 FBS-vs-FBS games; see the table in
+// game_script.py. Weeks 1-2 was overcorrecting at 1.369 and weeks 3-4 undercorrecting at 1.124.
+const MARGIN_GAIN_WEEKS = [[2, 1.224], [4, 1.228], [8, 1.000], [99, 1.070]];
+// a stuffed short-yardage run is compressed toward the line; see SHORT_LOSS_SCALE
+// Which downs carry their own passing curve in the distance to gain, and the key each is stored
+// under in the exported league params. Second down was added when its absence showed up in the
+// drive count: see DOWN_PASS_KEY in game_script.py.
+const DOWN_PASS_KEY = {"2": "second", "3": "third"};
+const SHORT_LOSS_TO_GO = 2;
+const SHORT_LOSS_SCALE = 0.70;
+// short yardage on a late down resolves at the marker; see MARKER_MIX in game_script.py
+const MARKER_CLEAR = 15;
+const MARKER_BAND = [-1, 0, 1, 2];
+const MARKER_WEIGHTS = [0.3201, 0.1616, 0.3056, 0.2127];
+// per down and distance; see MARKER_MIX in game_script.py for how each cell was solved
+const MARKER_MIX = {
+  "2": [0.043, 0.034, 0.027, 0.012, 0.022, 0.008],
+  "3": [0.183, 0.121, 0.037, 0.032, 0.029, 0.029],
+  "4": [0.250, 0.095, 0.031, 0.001, 0.000, 0.000],
+};
+const markerMix = (down, toGo) => {
+  const row = MARKER_MIX[String(Math.trunc(down))];
+  return row && toGo >= 1 && toGo <= row.length ? row[Math.trunc(toGo) - 1] : 0;
+};
+const MARKER_CUM = MARKER_WEIGHTS.reduce((a, w) => [...a, (a[a.length - 1] ?? 0) + w], [])
+                                 .map((v, _, c) => v / c[c.length - 1]);
+// the same dip on every down, as a scoring convention; see STICKS_SHORT in game_script.py
+const STICKS_SHORT = 0.20;
+const STICKS_LONG = 0.10;
+const STICKS_CLEAR = 3;
+const GOAL_PASS_SHIFT = -0.081;      // pass log-odds inside GOAL_MAX; see game_script.py
+const GOAL_PASS_DEFENSE = 0.1218;    // per unit of -(run_d + completion_d) inside GOAL_MAX
+const INTERCEPTION_LOGIT = -0.038;   // interception log-odds everywhere; see game_script.py
+const GOAL_INT_LOGIT = 0.188;        // interception log-odds inside GOAL_MAX; see game_script.py
+const GOAL_COMPLETION_SHIFT = -0.075; // completion yardage normal score inside GOAL_MAX
+const PENALTY_FIELD_BINS = [10, 20, 80];   // upper edges of toGoal; four bins of penalty events
+const PENALTY_DRAW_TRIES = 8;   // redraws before a penalty is clipped to the goal line
 const MARGIN_GAIN_POST = 1.0;
 const MARGIN_GAIN_FIRST_POST_WEEK = 16;
 
@@ -539,13 +794,14 @@ function marginGain(week) {
 }
 
 // One matchup: average score, win chance and the middle 80% of each team's points.
-function scriptProjection(data, teamA, teamB, site, sims = SCRIPT_SIMS, week = undefined) {
+function scriptProjection(data, teamA, teamB, site, sims = SCRIPT_SIMS, week = undefined,
+                          conditions = undefined) {
   const a = scriptTeam(data, teamA), b = scriptTeam(data, teamB);
   if (!a || !b) return null;
   const home = site === 'a' ? 0 : (site === 'b' ? 1 : null);
   const homeA = [], awayB = [], margins = [], totals = [];
   for (let i = 0; i < sims; i++) {
-    const [x, y] = new ScriptGame(data, [a, b], home).playGame();
+    const [x, y] = new ScriptGame(data, [a, b], home, conditions).playGame();
     homeA.push(x); awayB.push(y); margins.push(x - y); totals.push(x + y);
   }
   const mean = (v) => v.reduce((s, x) => s + x, 0) / v.length;

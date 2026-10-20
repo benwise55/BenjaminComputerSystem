@@ -2,7 +2,7 @@
 // Serve this folder (python3 -m http.server) rather than opening the file directly:
 // browsers block fetch() from file:// pages.
 
-const state = { season: null, teams: [], model: null, players: null, score: null, script: null, schedule: [], kind: 'passing', sort: {}, matchup: {}, price: {} };
+const state = { season: null, teams: [], model: null, players: null, score: null, script: null, schedule: [], injuries: null, kind: 'passing', sort: {}, matchup: {}, price: {} };
 const $ = (id) => document.getElementById(id);
 
 const fmt = {
@@ -288,12 +288,26 @@ function setupCombo(id) {
 // barely any games behind them, and hands most of it back to score Elo once they do. A weight
 // under 5% is dropped and the rest renormalised, so every row the chart draws is a model that
 // actually moves the number.
-const BLEND_WEEKS = [
-  { upto: 3,  weights: { script: 0.62, success: 0.20, epa: 0.11, elo: 0.07 } },
-  { upto: 6,  weights: { script: 0.76, elo: 0.24 } },
-  { upto: 9,  weights: { script: 0.62, elo: 0.38 } },
-  { upto: 99, weights: { elo: 0.44, script: 0.32, epa: 0.15, success: 0.09 } },
-];
+// A CURVE RATHER THAN FOUR STEPS, and three models rather than four. Held out one season at a
+// time over 8,737 regular-season FBS-vs-FBS games, the curve beats the step table by 0.00131 of
+// Brier (t = +3.3), and the gain is largest in weeks 1-2 (+0.00333) where the steps were furthest
+// from it. Free per-week weights do WORSE than the curve (0.17830 against 0.17740 on the games
+// where all four models exist) - sixty parameters fitting noise that nine describe.
+//
+// EPA IS GONE, with a weight the fit drives to zero at every week. That is not a verdict on the
+// EPA model: it is highly correlated with the other three, and once they are in the mix it adds
+// nothing. Dropping it also removes the week 1-2 special case, since EPA needs 100 games before it
+// exists and was simply absent from every game before week 3 - which is why an earlier version of
+// this fit, run only where all four models were present, could not see weeks 1-2 at all.
+//
+// THE EARLY WEIGHTS WERE CLOSE TO INVERTED. In week 1 the curve wants success Elo at 0.62 and the
+// simulator at 0.35; the step table had those almost exactly the other way round, and that single
+// disagreement is where most of the gain sits. Score Elo then climbs smoothly from 0.03 to 0.46,
+// which is the same handover the steps were approximating without the jumps at weeks 4, 7 and 10.
+//
+// weight(model, week) = exp(a + b * ln(week)), renormalised over the models that have a number.
+const BLEND_CURVE = { script: [-0.61298, -0.15449], success: [-0.03826, -0.51209], elo: [-2.93862, 0.84211] };
+const BLEND_WEEK_MAX = 15;
 
 // The week the season is up to: the earliest one that still has a game to play, or the last week
 // on the schedule once they have all been played. With no schedule at all the season is treated
@@ -324,7 +338,7 @@ function currentWeek() {
 // worse held out (slope 0.989 and Brier 0.1658, against 1.007 and 0.1655) and the intercept was
 // not significant anyway (-0.035, SE 0.044), so dropping it costs nothing and buys symmetry: an
 // evenly matched pair comes out at exactly 50%, whichever way round the two teams are entered.
-const WIN_STRETCH = 1.09349;       // 3,348 games, 2024-25
+const WIN_STRETCH = 1.22032;       // refitted with the curve, 8,737 games, 2014-26
 
 const logOdds = (p) => Math.log(Math.min(Math.max(p, 1e-6), 1 - 1e-6) / (1 - Math.min(Math.max(p, 1e-6), 1 - 1e-6)));
 
@@ -349,47 +363,136 @@ function compositeWin(weights, parts) {
 // standard errors at most, which is not enough to spend four parameters on.
 //
 // Applied to the MARGIN only. The Elo's win chance stays on the ungained margin, because
-// WIN_STRETCH and BLEND_WEEKS were fitted against the ungained probabilities.
+// WIN_STRETCH and BLEND_CURVE were fitted against the ungained probabilities.
 const ELO_MARGIN_GAIN = 0.835;
 
-// Against the spread the number itself is what matters, not who wins, so the spread columns use
-// a mix fitted on absolute margin error rather than on log loss. Fitted on one season and scored
-// on the other over the 1,550 FBS-vs-FBS games of 2024-25 that carry a closing line, it predicts
-// the margin to 12.45 points against the old EPA + success-Elo average's 12.66 (paired p=0.004).
-// Unlike the winner mix it does not want to vary by week - fitting a set per part of the season
-// gained 0.01 points, which is nothing (p=0.81) - and the objective is flat enough that these
-// weights are a direction rather than a precise point: every sensible set lands within 0.04 of
-// the best. They are the average of the held-out fits, which is steadier than either season's.
+// REMOVED: the margin mix that used to price the spread - a fixed blend, 37% game script, 31%
+// success Elo, 26% score Elo, 6% EPA, fitted to minimise absolute margin error. Two findings from
+// it are worth keeping, because both are reasons not to try it again.
 //
-// Being better at the margin did NOT make it better against the spread: 52.8% here against the
-// winner mix's 53.1%, and no pair of models in that test was separable at all. Nothing in this
-// file beats a closing line.
+// Being better at the margin did not make it better against the spread. It predicted the margin
+// to 12.45 points against the old EPA + success-Elo average's 12.66 (paired p=0.004) and still
+// went 52.8% against the line, under the winner mix's 53.1%, with no pair of models separable.
+// Accuracy on the margin and accuracy against a line are not the same objective, which is why
+// ATS_COVER below fits the cover directly instead.
 //
-// REFITTED AND REJECTED once the per-model margin gains went in. The reasoning for refitting was
-// sound - part of what these weights were doing was correcting scale, so correcting each model
-// first should free them to express only which opinion is worth more - but the measurement did not
-// agree. Over the 1,420 FBS-vs-FBS games of 2024-25 that every model covers, on this build with
-// the gain applied: these weights give MAE 12.198, and a refit held out by season gives 12.189 -
-// a difference of 0.009 points, paired t = -0.26, p = 0.79, bootstrap CI [-0.045, +0.033]. The
-// refit was also worse on BOTH held-out folds taken singly (12.233 against 12.224, and 12.177
-// against 12.172), so these are kept.
-//
-// The reason is that the two gains offset inside the mix: the simulator is scaled up and the score
-// Elo down, and this mix holds both, so correcting each one individually leaves the blend close to
-// where it already was. The gains are still worth having on their own terms - alone, the Elo goes
-// from 12.768 to 12.614 and the simulator from 12.575 to 12.522 - and the case for them is
+// Refitting it after the per-model margin gains went in changed nothing: 12.198 against 12.189
+// over 1,420 games, paired t = -0.26, p = 0.79. The reason is that the two gains offset inside
+// the mix - the simulator is scaled up and the score Elo down - so correcting each one leaves the
+// blend where it was. The gains are still worth having on their own terms; alone, the Elo goes
+// from 12.768 to 12.614 and the simulator from 12.575 to 12.522, and the case for them is
 // calibration rather than accuracy. See the note in game_script.py.
-const MARGIN_MIX = { epa: 0.06, success: 0.31, elo: 0.26, script: 0.37 };
 
-// The margin mix over whichever models have a number, renormalised the same way blendWeights does
-function mixMargin(parts) {
-  let num = 0, den = 0;
-  for (const [k, w] of Object.entries(MARGIN_MIX)) {
-    if (!parts[k]) continue;
-    num += w * parts[k].margin;
-    den += w;
-  }
-  return den > 0.3 ? num / den : null;
+// AGAINST THE SPREAD, WHICH WANTS A DIFFERENT QUESTION FROM THE WINNER. The old margin mix - a
+// fixed blend, scored by how far it sat from the line - picked 50.45% of 9,846 games since 2014
+// against their closing line. It was not merely failing to win; it was the worst thing tested.
+//
+// What is fitted here is the COVER itself, actual margin minus the line, from the models and the
+// line together. That is the question a spread bet asks, and it lets the fit shrink toward the
+// market rather than assume a blend should stand on its own. Held out one season at a time, that
+// basis change is worth about a point of strike rate: 50.45% to 51.47%.
+//
+// IT STILL DOES NOT BEAT THE MARKET, and the gap is not small. 51.47% against the 52.4% a -110 bet
+// needs is about two standard errors short. What IS real is the ordering: held out, the chance of
+// covering rises with the size of the disagreement at t = +2.8 (see ATS_FIT in value.js). The fit
+// knows something; it does not know enough.
+//
+// IT SPLITS BY CONFERENCE AS A HYPOTHESIS, NOT A FINDING. The mechanism is plausible and visible
+// in the coefficients: in conference play success Elo earns +0.149, out of conference it earns
+// -0.000, because two sides with no common opponents give a comparative rating less to stand on,
+// while the simulator, which plays the game out from team terms, holds up either way. But fitting
+// the split beats one pooled fit by only +0.0010 held out (t +0.3), and a RANDOM split of the same
+// shape averages +0.0017 - better than the real one. So the partitions are kept because the
+// mechanism argues for them, not because the data distinguishes them. FCS-vs-FCS is its own fit on
+// 317 games for the same reason, and 317 games settle nothing.
+//
+// EPA IS DROPPED, and that is a trade rather than a free choice. Only 7,945 of these games carry
+// an EPA margin at all, and in weeks 1 and 2 just 107 of 1,882 do. On the games where it exists,
+// carrying it is worth about +0.3 of strike rate; carrying it costs the first fortnight of every
+// season entirely. The first fortnight is where this fit is weakest anyway - 49.3% in weeks 1-2
+// against 52.1% in weeks 3-8 - so neither choice rescues it.
+// The score Elo's margin arrives already scaled by ELO_MARGIN_GAIN. That is the basis these
+// coefficients were fitted on, so passing the raw one instead quietly mis-weights that term.
+const ATS_COVER = {                 // [script, success, elo, line, const] -> predicted cover
+  fcs:     [0.0897,  0.3043, -0.3004, -0.1254,  0.7157],
+  inconf:  [0.1724,  0.1494, -0.0362, -0.2076, -0.6587],
+  nonconf: [0.0723, -0.0001, -0.0211, -0.0272, -0.3028],
+};
+
+// NOT BEFORE WEEK 3, because before week 3 the three models have nothing to say about the line.
+// Regressing the cover on [script, success, elo, line] inside each part of the season, the three
+// models together are F(3, 1877) = 0.50 in weeks 1-2 - nothing at all - against 6.87 in weeks 3-8
+// and 8.57 in weeks 9+. The ordering the fit sells goes with them: held out, the chance of
+// covering rises with the size of the disagreement at +0.113 per point in weeks 3-8 (t +2.7) and
+// +0.096 in weeks 9+ (t +2.1), and at -0.012 in weeks 1-2 (se 0.077). Strike rate says the same
+// more loudly and less reliably - 49.79% of 1,882 games against 51.69% and 51.67%. The mechanism
+// is not one anyone has to guess at: in weeks 1 and 2 none of the three models has a
+// current-season game to stand on, so all three are reporting priors and their disagreement with
+// the line is noise.
+//
+// THE GAP ON ITS OWN IS NOT SIGNIFICANT, at t = +1.48, and that is the honest size of it. What
+// makes it worth acting on is that acting costs nothing. Held out, the shipped curve scores a
+// Brier of 0.25049 on those 1,882 games where saying nothing scores exactly 0.25000, so the pick
+// is worth less than no pick; and the fit does not clear the vig anywhere (51.3% against the
+// 52.4% a -110 bet needs), so even a suppressed pick that would have been right was a losing bet.
+//
+// IT IS NOT ONE OR TWO SEASONS, NOT FCS, AND NOT THE LINES. Dropping the worst season leaves
+// weeks 1-2 at 50.45%, still a point and a quarter under the rest, and no single season moves it
+// by more than 0.7 of a point. Inside weeks 1-2 the three matchup types land at 50.0% (FCS,
+// n=112), 46.6% (in conference, n=118) and 50.0% (non conference, n=1,652), so no one of them
+// carries it. Early lines ARE different - they average 19.1 points against 12.7 later - but line
+// size does not sort the record anywhere (51.0% to 52.1% across four bands over the whole sample),
+// and reweighting weeks 1-2 to the later line mix makes them WORSE, at 48.60%.
+//
+// PLACEBO. Of the thirteen two-week windows in a season, weeks 1-2 is the only one where
+// suppressing the pick improves the whole-sample Brier; the other twelve all make it worse, by
+// +0.00007 on average. A random same-size mask of games beats it 19 times in 400.
+//
+// A CURVE WAS REJECTED, which is where this differs from BLEND_CURVE. There is no gradient to
+// ride - weeks 3-8 and weeks 9+ have the same slope, and the break is a step between week 2 and
+// week 3. Brier against saying nothing, week by week: week 1 +0.00085, week 2 +0.00004, week 3
+// -0.00066, week 4 -0.00101. Fitted as a curve it is worse held out than the flat fit, by
+// +0.000065 of Brier with ln(week) on the slope and +0.000116 with it on the slope and the
+// intercept. Shrinking toward zero rather than switching off is the same story from the other
+// end: the held-out Brier improves monotonically as the shrink factor falls, and is best at zero.
+//
+// THE CUTOFF IS WEEK 3 AND THE DATA DOES NOT INSIST ON IT. Chosen out of season, one season at a
+// time, it comes out at week 3 seven times and week 2 six; over the whole sample the two are
+// -0.000093 and -0.000090 of Brier, which is the same number. Week 2 is kept out because it is
+// exactly neutral rather than because it is bad, and because after one game the models are still
+// reading priors. Week 0 falls under the same gate for the same reason.
+//
+// ATS_FIT in value.js is NOT refitted for this. On the games that remain its slope is 0.105
+// against 0.093 over all of them - a fifth of a standard error - so the gate does not move the
+// curve that turns an edge into a cover chance.
+const ATS_MIN_WEEK = 3;
+
+// True where the spread fit has no opinion worth printing. An unknown week is treated as late
+// rather than early: the gate is a statement about games with no season behind them, and a
+// fixture the schedule cannot place is not one of those.
+const atsTooEarly = (week) => week !== null && week !== undefined && week < ATS_MIN_WEEK;
+
+// Which fit a matchup gets. The schedule carries no in-conference flag, so it comes off the two
+// teams' conferences - with independents excluded, since two of them share a conference NAME
+// without sharing a conference, and the schedule the fit read would have called that game
+// non-conference.
+function atsKind(ta, tb) {
+  if (division(ta) !== 'FBS' && division(tb) !== 'FBS') return 'fcs';
+  const c = ta.conference;
+  const shared = c && tb.conference === c && !/Independent/i.test(c);
+  return shared ? 'inconf' : 'nonconf';
+}
+
+// The predicted cover for the HOME side, in points. Fitted home-relative and carrying a constant -
+// in conference play the home side covers about 0.66 less than the models alone say - so it is NOT
+// sign-symmetric and cannot simply be negated for the away team. The constant is dropped on a
+// neutral field, where neither side is the home one; that is a judgement rather than a measurement,
+// because the review file does not mark neutral games and the fit could not separate them.
+function coverForHome(parts, lineHome, homed) {
+  const b = ATS_COVER[parts.kind] ?? ATS_COVER.inconf;
+  if (parts.script == null || parts.success == null || parts.elo == null) return null;
+  return b[0] * parts.script + b[1] * parts.success + b[2] * parts.elo
+       + b[3] * lineHome + (homed ? b[4] : 0);
 }
 
 // Running the simulator for a whole table is the one expensive thing the page does, so each
@@ -401,18 +504,75 @@ const scriptCache = new Map();
 // The week is part of the key because the projection carries that week's margin gain (see
 // marginGain in script.js), so the same matchup simulated for week 2 and for week 10 is not the
 // same number. Two meetings of the same pair in one season do not otherwise happen.
-const scriptKey = (home, away, neutral, week) =>
-  `${home}|${away}|${neutral ? 'n' : 'h'}|${week ?? '-'}`;
+// The per-game conditions belong in the key as well - weather and travel are per GAME rather than
+// per matchup, and a fixture picks up a forecast only once the line table is fetched inside its
+// horizon, so a game simulated before the forecast arrived must not keep serving the old answer.
+const conditionsTag = (c) => (c
+  ? `|${c.temp ?? ''}/${c.wind ?? ''}/${c.wet ?? ''}/${c.travel ? c.travel.join(',') : ''}`
+    + `/${c.rest ? c.rest.join(',') : ''}`
+  : '|-');
+const scriptKey = (home, away, neutral, week, conditions) =>
+  `${home}|${away}|${neutral ? 'n' : 'h'}|${week ?? '-'}${conditionsTag(conditions)}`;
+
+// Only the fields the dashboard actually carries, and undefined when it carries none - which is
+// what a game past the forecast horizon looks like, and means it is simulated with no weather
+// adjustment rather than a league-average one. travel is [home hours, away hours] as exported.
+function scriptConditions(g) {
+  if (!g) return undefined;
+  const c = {};
+  if (g.temp != null) c.temp = g.temp;
+  if (g.wind != null) c.wind = g.wind;
+  if (g.wet != null) c.wet = g.wet;
+  if (Array.isArray(g.travel) && g.travel.length === 2) c.travel = g.travel;
+  if (Array.isArray(g.rest) && g.rest.length === 2) c.rest = g.rest;
+  return Object.keys(c).length ? c : undefined;
+}
+
+// The matchup page is normally looking at a real fixture, so it uses that game's conditions.
+// Without this the same game reads one way in the weekly table and another on its own page.
+//
+// ORIENTATION MATTERS HERE, and only for travel. The weather fields apply to both sides equally,
+// but the exported hours are [home, away] and the matchup page may name the pair the other way
+// round - handing them over unswapped would credit the host with the visitor's journey.
+function scheduleConditions(first, second) {
+  if (!state.schedule) return undefined;
+  const g = state.schedule.find(
+    (x) => (x.home === first && x.away === second) || (x.home === second && x.away === first));
+  const c = scriptConditions(g);
+  // travel and rest are both [home, away] as exported, so both need swapping when the caller
+  // names the pair the other way round. The weather fields apply to both sides equally.
+  if (c && g.home === second) {
+    if (c.travel) c.travel = [c.travel[1], c.travel[0]];
+    if (c.rest) c.rest = [c.rest[1], c.rest[0]];
+  }
+  return c;
+}
+
+// The book's own numbers for this fixture, so the price grid starts from the real line rather
+// than an empty box. Same lookup as scheduleConditions, and the same orientation problem: spread
+// is exported home-relative (negative means the HOME team is favoured), so it flips when the
+// matchup page names the visitor first. Returning it oriented to `first` keeps the caller from
+// having to know which side the schedule called home.
+function scheduleLines(first, second) {
+  if (!state.schedule) return undefined;
+  const g = state.schedule.find(
+    (x) => (x.home === first && x.away === second) || (x.home === second && x.away === first));
+  if (!g) return undefined;
+  const spread = g.spread ?? null;
+  return { spreadFirst: spread === null ? null : (g.home === first ? spread : -spread),
+           total: g.over_under ?? null };
+}
 
 // undefined means "not played out yet", null means "this matchup has no simulation"
-function scriptCached(home, away, neutral, week) {
-  return scriptCache.get(scriptKey(home, away, neutral, week));
+function scriptCached(home, away, neutral, week, conditions) {
+  return scriptCache.get(scriptKey(home, away, neutral, week, conditions));
 }
-function scriptRun(home, away, neutral, week) {
-  const key = scriptKey(home, away, neutral, week);
+function scriptRun(home, away, neutral, week, conditions) {
+  const key = scriptKey(home, away, neutral, week, conditions);
   if (scriptCache.has(key)) return scriptCache.get(key);
   const out = state.script
-    ? scriptProjection(state.script, home, away, neutral ? 'neutral' : 'a', SCRIPT_TABLE_SIMS, week)
+    ? scriptProjection(state.script, home, away, neutral ? 'neutral' : 'a', SCRIPT_TABLE_SIMS,
+                       week, conditions)
     : null;
   scriptCache.set(key, out);
   return out;
@@ -421,17 +581,89 @@ function scriptRun(home, away, neutral, week) {
 // The weights for a week, over the models that actually have a number for this matchup. A model
 // that is missing does not vote, and the survivors are renormalised so they still sum to 1.
 function blendWeights(week, available) {
-  const table = (BLEND_WEEKS.find((b) => week <= b.upto) ?? BLEND_WEEKS[BLEND_WEEKS.length - 1]).weights;
+  const l = Math.log(Math.min(Math.max(week || 1, 1), BLEND_WEEK_MAX));
   const out = {};
   let sum = 0;
-  for (const [k, w] of Object.entries(table)) {
+  for (const [k, ab] of Object.entries(BLEND_CURVE)) {
     if (available[k] === undefined || available[k] === null) continue;
+    const w = Math.exp(ab[0] + ab[1] * l);
     out[k] = w;
     sum += w;
   }
   if (!sum) return {};
   for (const k of Object.keys(out)) out[k] /= sum;
   return out;
+}
+
+// ---------------------------------------------------------------- injuries
+
+// What a team loses if a listed player does not play, in that player's own currency. Offensive
+// players carry EPA, which says how much his work has been worth; defenders have no EPA in this
+// project, so their line is the counting stats the play-by-play credits them - tackles, sacks,
+// pass breakups, hurries, interceptions - and the biggest two or three are enough to say whether
+// a name is a starter or a reserve.
+function injuryImpact(entry) {
+  if (!entry.matched || !entry.stats?.length) return '';
+  const parts = [];
+  const offence = entry.stats.filter((s) => s.epa != null);
+  for (const s of offence.sort((x, y) => Math.abs(y.epa) - Math.abs(x.epa)).slice(0, 2)) {
+    const share = s.share != null ? `${Math.round(100 * s.share)}% of ${s.unit}` : `${fmt.int(s.volume)} ${s.unit}`;
+    parts.push(`${share}, ${s.epa >= 0 ? '+' : ''}${s.epa.toFixed(1)} EPA`);
+  }
+  const def = entry.stats.find((s) => s.role === 'defense');
+  if (def) {
+    const counts = [['tackles', 'tkl'], ['sacks', 'sk'], ['pass_breakups', 'PBU'],
+                    ['interceptions', 'INT'], ['hurries', 'hur'], ['forced_fumbles', 'FF']]
+      .filter(([k]) => def[k]).map(([k, label]) => `${def[k] % 1 ? def[k].toFixed(1) : def[k]} ${label}`);
+    if (counts.length) parts.push(counts.slice(0, 4).join(', '));
+  }
+  return parts.join(' · ');
+}
+
+// Out and Questionable are the two that matter and they are kept visually apart, because a
+// designation this source cannot qualify is worth very different amounts in each case: Out is a
+// fact, Questionable is usually "undisclosed" and days old. Everything else the report carries -
+// Doubtful, Probable, Day-To-Day - is rare enough to fold in beside Questionable rather than
+// give a colour of its own.
+const INJURY_CLASS = (status) => (/^out/i.test(status) ? 'out' : /doubtful/i.test(status) ? 'doubtful' : 'questionable');
+
+function injuryList(team) {
+  const entries = state.injuries?.teams?.[team];
+  if (!entries?.length) {
+    return `<p class="injury-none">${state.injuries ? 'No designations listed.' : 'No report loaded.'}</p>`;
+  }
+  return `<ul class="injury-list">${entries.map((e) => {
+    const impact = injuryImpact(e);
+    const name = e.matched ? e.name.split(',').reverse().map((x) => x.trim()).join(' ') : e.name;
+    return `<li class="${INJURY_CLASS(e.status)}">
+      <span class="injury-status">${e.status}</span>
+      <span class="injury-name">${name}</span>
+      <span class="injury-pos">${e.pos || ''}</span>
+      ${impact ? `<span class="injury-impact">${impact}</span>` : '<span class="injury-impact none">no stat line matched</span>'}
+      ${e.note ? `<span class="injury-note">${e.note}${e.as_of ? ` · ${e.as_of}` : ''}</span>` : ''}
+    </li>`;
+  }).join('')}</ul>`;
+}
+
+function injuryBlock(a, b) {
+  if (!state.injuries) return '';
+  const count = (team, test) => (state.injuries.teams[team] ?? []).filter((e) => test.test(e.status)).length;
+  const tally = (team) => `${count(team, /^out/i)} out, ${count(team, /^(questionable|doubtful|probable|day)/i)} questionable`;
+  // Designations go off quickly and the file is fetched by hand, so the page says how old it is
+  // rather than letting a week-old panel read as this week's news.
+  const days = Math.floor((Date.now() - Date.parse(`${state.injuries.fetched}T12:00:00`)) / 86400000);
+  const age = days >= 2 ? ` <span class="injury-stale">${days} days old</span>` : '';
+  return `<div class="injuries">
+    <h3>Injury report <span class="injury-src">${state.injuries.source}, fetched ${state.injuries.fetched}</span>${age}</h3>
+    <div class="injury-cols">
+      <div><h4>${a.team} <span class="injury-tally">${tally(a.team)}</span></h4>${injuryList(a.team)}</div>
+      <div><h4>${b.team} <span class="injury-tally">${tally(b.team)}</span></h4>${injuryList(b.team)}</div>
+    </div>
+    <p class="injury-caveat">College programs file no mandated injury report, so most entries read
+      "Questionable - Undisclosed" and carry the date they were first listed rather than a game-day
+      status. Out is the column to trust. Impact is this season's work through the last rebuild;
+      it is shown so a name can be placed, and no rating on this page is adjusted for it.</p>
+  </div>`;
 }
 
 function showPrediction() {
@@ -453,7 +685,8 @@ function showPrediction() {
   // the game-script model plays the match out snap by snap, so it is its own opinion rather than
   // a second view of the ratings above
   const script = state.script
-    ? scriptProjection(state.script, a.team, b.team, site, undefined, currentWeek())
+    ? scriptProjection(state.script, a.team, b.team, site, undefined, currentWeek(),
+                       scheduleConditions(a.team, b.team))
     : null;
 
   // The mix for where the season has got to. Margins and win chances are weighted separately,
@@ -577,15 +810,38 @@ function showPrediction() {
   // returns, so a stake of 1 comes back as the multiplier when the bet lands.
   const gameKind = division(a) === 'FBS' && division(b) === 'FBS' ? 'FBS vs FBS'
     : division(a) !== 'FBS' && division(b) !== 'FBS' ? 'FCS vs FCS' : 'cross-division';
-  // the moneyline is priced off the composite, the spread off the margin-fitted mix
-  const atsMargin = mixMargin(models) ?? margin;
-  state.price.context = { a: a.team, b: b.team, margin, pA, atsMargin, projection, script, gameKind };
+  // the moneyline is priced off the composite; the spread is priced off a fit that needs the
+  // line itself, so only the parts travel here and the cover is computed once a price is entered
+  const sideSign = site === 'a' ? 1 : site === 'b' ? -1 : 0;   // +1 when team A is the home side
+  const atsParts = { kind: atsKind(a, b), script: models.script ? models.script.margin : null,
+                     success: models.success ? models.success.margin : null,
+                     elo: models.elo ? models.elo.margin : null };
+  // the week travels with the parts because the spread fit is gated on it (see ATS_MIN_WEEK);
+  // the matchup page has no fixture of its own, so it is the week the season has got to
+  state.price.context = { a: a.team, b: b.team, margin, pA, projection, script, gameKind,
+                          atsParts, sideSign, atsWeek: week };
+  // Pre-fill the line we hold for this game. Keyed on the matchup so a number the reader typed
+  // for THIS pairing survives a re-render, while moving to a different pairing replaces it.
+  // Clearing matters as much as filling: state.price outlives the matchup, so without this the
+  // previous fixture's spread would sit in the box looking like it belonged to this one.
+  const lines = scheduleLines(a.team, b.team);
+  const priceKey = `${state.season}|${a.team}|${b.team}`;
+  if (state.price.filledFor !== priceKey) {
+    const sp = lines?.spreadFirst ?? null, tot = lines?.total ?? null;
+    state.price.spreadA = sp === null ? '' : String(sp);
+    state.price.spreadB = sp === null ? '' : String(-sp);
+    state.price.total = tot === null ? '' : String(tot);
+    state.price.filledFor = priceKey;
+  }
+  const haveLines = (lines?.spreadFirst ?? null) !== null || (lines?.total ?? null) !== null;
   const box = (id, ph, step) => `<input id="price-${id}" type="number" step="${step}" placeholder="${ph}" value="${state.price[id] ?? ''}">`;
   const cellFor = (line, mult, ev) =>
     `<div class="cell">${line}<div class="mult">${mult}<span class="x">\u00d7</span></div><div class="ev" id="ev-${ev}"></div></div>`;
   const priceBlock = `
     <div class="price">
-      <h4>Test a price <span class="sub">enter the book's numbers; multipliers are decimal returns, so 1.91 is \u2212110</span></h4>
+      <h4>Test a price <span class="sub">${haveLines
+        ? 'spread and total are the line we hold for this game \u2013 overwrite to test another'
+        : 'enter the book\'s numbers'}; multipliers are decimal returns, so 1.91 is \u2212110</span></h4>
       <div class="price-scroll"><table class="price-grid">
         <thead><tr><th></th><th>Spread</th><th>To win</th><th>Total</th></tr></thead>
         <tbody>
@@ -627,7 +883,8 @@ function showPrediction() {
     <table class="compare">
       <thead><tr><th></th><th>${a.team}</th><th>${b.team}</th></tr></thead>
       <tbody>${rows.map((row) => `<tr><td class="text">${row.label}</td>${compareCell(row, a)}${compareCell(row, b)}</tr>`).join('')}</tbody>
-    </table>`;
+    </table>
+    ${injuryBlock(a, b)}`;
   drawCharts();
   PRICE_FIELDS.forEach((id) => $(`price-${id}`)?.addEventListener('input', showPrice));
   showPrice();
@@ -661,7 +918,7 @@ const PRICE_FIELDS = ['spreadA', 'multSA', 'multMLA', 'spreadB', 'multSB', 'mult
 function showPrice() {
   const out = $('price-out');
   if (!out || !state.price.context) return;
-  const { a, b, margin, pA, atsMargin, projection, script, gameKind } = state.price.context;
+  const { a, b, margin, pA, projection, script, gameKind, atsParts, sideSign, atsWeek } = state.price.context;
   const num = (id) => {
     const raw = $(`price-${id}`)?.value.trim() ?? '';
     state.price[id] = raw;
@@ -686,7 +943,32 @@ function showPrice() {
        [['spreadA', a, 'spreadA', 'multSA', (x) => -x], ['spreadB', b, 'spreadB', 'multSB', (x) => x]]) {
     const spread = v[spreadKey], mult = v[multKey] ?? 1.91;
     if (spread === null || mult <= 1) { show(id, null); continue; }
-    const edgeForA = atsMargin - toMarketA(spread);
+    // the market line for team A, turned home-relative for the fit and the answer turned back
+    const lineA = toMarketA(spread);
+    const flip = sideSign === -1 ? -1 : 1;
+    const toHome = (x) => x * flip;
+    if (atsTooEarly(atsWeek)) {
+      // before week 3 the fit has no opinion (see ATS_MIN_WEEK), and the composite's own
+      // disagreement with the line is not a substitute for one - it is the thing the fit was
+      // built to replace, and it is no better this early. So no number, and the reason for it.
+      show(id, null);
+      // one note for the pair rather than one per side: the reason is the same on both, and it
+      // is about the week rather than about either price
+      if (team === a) {
+        notes.push(`<p><strong>No read on the spread.</strong> In weeks 1 and 2 none of the ` +
+          `three models has a current-season game behind it, and over the 1,882 such games ` +
+          `since 2014 they add nothing to the closing line \u2014 jointly F(3,1877) = 0.50, ` +
+          `against 6.87 in weeks 3-8, and held out they pick 49.8% against the spread. The ` +
+          `line is the whole answer this early.</p>`);
+      }
+      continue;
+    }
+    const cover = coverForHome({ kind: atsParts.kind, script: toHome(atsParts.script),
+                                 success: toHome(atsParts.success), elo: toHome(atsParts.elo) },
+                               toHome(lineA), sideSign !== 0);
+    // with a model missing there is no fit to apply, so it falls back to the composite's own
+    // disagreement with the line - a worse read, and the only one left
+    const edgeForA = cover === null ? margin - lineA : cover * flip;
     const c = coverChanceFor(team === a ? edgeForA : -edgeForA);
     show(id, evFromMultiplier(c.chance, mult));
     notes.push(`<p><strong>${team} ${fmt.signed(spread, 1)}</strong> covers <strong>${pct(c.chance)}</strong> of the time ` +
@@ -799,6 +1081,11 @@ function renderWin(r) {
 }
 
 function renderEdge(r) {
+  // A line but no fit, because the season has not started enough - said rather than left blank, so
+  // an empty cell does not read as a missing spread (see ATS_MIN_WEEK). Keyed on the GATE, not on
+  // whether a number arrived: a game still waiting on its simulator run is empty for a different
+  // reason and must not be labelled as one the fit declines to price.
+  if (r.hasVegas && r.atsGated) return `<span class="sub" title="The spread fit is switched off before week 3: with no current-season games behind them the three models add nothing to the closing line there (jointly F(3,1877) = 0.50, against 6.87 in weeks 3-8), and held out they pick 49.8% of those 1,882 games. The line itself is the whole answer this early.">Too early</span>`;
   if (r.edge === null || r.edge === undefined || Number.isNaN(r.edge)) return '–';
   if (Math.abs(r.edge) < 0.2) return '<span class="sub">Even</span>';
   const pick = r.edge > 0 ? r.home : r.away;
@@ -808,14 +1095,16 @@ function renderEdge(r) {
 }
 
 function renderSignalBadge(r) {
-  if (r.hasVegas) {
+  // the spread badges name the fit's pick, so where the fit is gated out (see ATS_MIN_WEEK) the
+  // row falls back to describing the straight-up agreement, which is what is left to describe
+  if (r.atsLive) {
     if (r.isStrongSignal) {
-      return `<span class="badge gold" title="EPA sees value here and success Elo does not, or the other way round. Backing the model line in this group went 182-150 (54.8%) over the 1,550 games of 2024-25, against a 52.4% break-even at -110 - the best of the three, and still inside the margin of error on 332 games.">Lean ${r.atsPick}</span>`;
+      return `<span class="badge gold" title="EPA sees value here and success Elo does not, or the other way round. Backing the model line in this group went 881-855 (50.7%) over the 7,945 games since 2014 that carry both a closing line and an EPA margin - the WORST of the three, where on the old margin-based line it was the best. Re-measured against the spread fit, none of the three groups is more than 1.4 standard errors from another, so the ordering is noise.">Lean ${r.atsPick}</span>`;
     }
     if (r.modelsAgreeATS) {
-      return `<span class="badge agree" title="EPA and success Elo pick the same side. Backing the model line in this group went 297-281 (51.4%) over the 1,550 games of 2024-25, under the 52.4% break-even at -110.">Agree ${r.atsPick}</span>`;
+      return `<span class="badge agree" title="EPA and success Elo pick the same side. Backing the model line in this group went 2156-1990 (52.0%) over the 7,945 games since 2014 that carry both a closing line and an EPA margin, under the 52.4% break-even at -110.">Agree ${r.atsPick}</span>`;
     }
-    return `<span class="badge disagree" title="EPA and success Elo pick opposite sides. Backing the model line in this group went 339-301 (53.0%) over the 1,550 games of 2024-25, which is break-even once the vig is paid. These badges describe how the models relate, not an edge.">Split</span>`;
+    return `<span class="badge disagree" title="EPA and success Elo pick opposite sides. Backing the model line in this group went 1093-970 (53.0%) over the 7,945 games since 2014 that carry both a closing line and an EPA margin - nominally the best of the three, and inside the margin of error of the other two. These figures are also in sample for the spread fit; out of season, over the games it prices, it manages 51.7%. These badges describe how the models relate, not an edge.">Split</span>`;
   }
   if (r.modelsAgreeSU) {
     return `<span class="badge agree" title="Both models pick ${r.suPick} to win">Agree (${r.suPick})</span>`;
@@ -850,7 +1139,7 @@ const weeklyColumns = [
   { key: 'win_sort', label: 'To win', title: 'Straight-up pick from the composite - the week-varying mix of models, the same one the Matchup page blends. Fitted on one season and scored on the other over 2024-25, it beat the flat EPA + success-Elo average at picking winners in every part of the season', render: (r) => renderWin(r) },
   { key: 'epa_margin', label: 'EPA Line', title: 'Opponent-adjusted EPA predicted line. Bold indicates favorite', render: (r) => formatLine(r.home, r.away, r.epa_margin, r.epa_p) },
   { key: 'success_margin', label: 'Success Elo', title: 'Play-success Elo predicted line. Bold indicates favorite', render: (r) => formatLine(r.home, r.away, r.success_margin, r.success_p) },
-  { key: 'mix_margin', label: 'Model line', defaultSort: true, title: 'The predicted margin, from the mix fitted to be most accurate on raw margin: 37% game script, 31% success Elo, 26% score Elo, 6% EPA. Each model\'s margin is scaled to its own measured gain first. This is the number the Edge column is measured against', render: (r) => formatLine(r.home, r.away, r.mix_margin) },
+  { key: 'mix_margin', label: 'Model line', defaultSort: true, title: 'The line this game should carry, from a fit of the cover itself - how far the final margin lands from the line - on the game script, success Elo, score Elo and the line together, with its own coefficients for in-conference, non-conference and FCS-vs-FCS games. It needs a line to shade, so it is blank where there is no spread, and it is switched off before week 3, where the models have no season behind them and add nothing to the line. Held out one season at a time it picks 51.7% of the games it now prices, where -110 breaks even at 52.4%. This is the number the Edge column is measured against', render: (r) => (r.hasVegas && r.atsGated ? `<span class="sub" title="The spread fit is switched off before week 3: with no current-season games behind them the three models add nothing to the closing line there (jointly F(3,1877) = 0.50, against 6.87 in weeks 3-8), and held out they pick 49.8% of those 1,882 games. The line itself is the whole answer this early.">Too early</span>` : formatLine(r.home, r.away, r.mix_margin)) },
   { key: 'spread', label: 'Spread', title: 'Consensus/closing Vegas spread (negative is favorite)', render: (r) => formatSpread(r.home, r.away, r.spread) },
   { key: 'edge', label: 'Edge', title: 'Model line vs Vegas spread. Points of value on favorite/underdog', render: (r) => renderEdge(r) },
   { key: 'signal_sort', label: 'Agreement', text: true, title: 'Whether the two models pick the same side against the spread. Hover a badge for how that rule did over 2024-25 - none of them beat the closing line', render: (r) => renderSignalBadge(r) },
@@ -886,7 +1175,7 @@ function scheduleScriptFill(games) {
       const g = games[i++];
       // the week has to match what the table will ask for, or the fill lands under a different
       // cache key and every row is simulated a second time
-      scriptRun(g.home, g.away, g.neutral, g.week);
+      scriptRun(g.home, g.away, g.neutral, g.week, scriptConditions(g));
     }
     if (i < games.length) {
       const note = $('weekly-note').firstChild;
@@ -943,7 +1232,7 @@ function showWeeklyPredictions() {
     const h = byName[g.home], a = byName[g.away];
     const side = g.neutral ? 0 : 1;
     let epaMargin = null, epaP = null, successMargin = null, successP = null, blendMargin = null, blendP = null;
-    let edge = null, hasVegas = false, modelsAgreeATS = false, isStrongSignal = false, atsPick = '';
+    let edge = null, hasVegas = false, atsLive = false, atsGated = false, modelsAgreeATS = false, isStrongSignal = false, atsPick = '';
     let modelsAgreeSU = false, suPick = '';
     let winMargin = null, winP = null, winPick = '', mixM = null;
 
@@ -962,9 +1251,10 @@ function showWeeklyPredictions() {
       // Picking the winner is the one job the week-varying mix was fitted for, so the To win
       // column uses it. The spread columns stay on the EPA + success-Elo blend, whose edge rules
       // and badges were calibrated on that pair.
-      let script = scriptCached(g.home, g.away, g.neutral, g.week);
+      const gcond = scriptConditions(g);
+      let script = scriptCached(g.home, g.away, g.neutral, g.week, gcond);
       if (script === undefined) {
-        if (performance.now() < budget) script = scriptRun(g.home, g.away, g.neutral, g.week);
+        if (performance.now() < budget) script = scriptRun(g.home, g.away, g.neutral, g.week, gcond);
         else { script = null; unsimulated.push(g); }
       }
       const eloMarginRaw = h.elo_points - a.elo_points + side * m.elo_home_points;
@@ -982,17 +1272,31 @@ function showWeeklyPredictions() {
       for (const [k, wgt] of Object.entries(wts)) winMargin += wgt * parts[k].margin;
       winP = compositeWin(wts, parts);
       winPick = winP >= 0.5 ? g.home : g.away;
-      // and the spread side on the margin-fitted mix
-      mixM = mixMargin(parts);
-
       if (g.spread !== null && g.spread !== undefined && !Number.isNaN(g.spread)) {
         hasVegas = true;
         const vegasMargin = -g.spread;
-        edge = (mixM ?? blendMargin) - vegasMargin;
+        // the spread side reads the cover off the line itself (see ATS_COVER), so there is a model
+        // line here only once there is a line to shade - without one the column stays empty.
+        // Before ATS_MIN_WEEK it stays empty for the other reason: the fit has no opinion there,
+        // and the whole point of the gate is that the empty cell is the honest answer rather than
+        // a fallback to some other model's disagreement with the line.
+        // the gate and a simulator result that has not arrived yet both leave the cell empty, but
+        // only the gate is an ANSWER - a game still waiting on its sim must not be labelled as one
+        // the fit declines to price
+        atsGated = atsTooEarly(g.week);
+        const cover = atsGated ? null : coverForHome(
+          { kind: atsKind(h, a), script: parts.script ? parts.script.margin : null,
+            success: parts.success.margin, elo: parts.elo.margin },
+          vegasMargin, !g.neutral);
+        atsLive = cover !== null;
+        if (atsLive) {
+          mixM = vegasMargin + cover;
+          edge = mixM - vegasMargin;
+          atsPick = edge >= 0 ? g.home : g.away;
+        }
         const edgeEpa = epaMargin - vegasMargin;
         const edgeSuccess = successMargin - vegasMargin;
         modelsAgreeATS = Math.sign(edgeEpa) === Math.sign(edgeSuccess);
-        atsPick = edge >= 0 ? g.home : g.away;
         if ((Math.abs(edgeSuccess) >= 3.0 && Math.abs(edgeEpa) < 1.5) ||
             (Math.abs(edgeEpa) >= 3.0 && Math.abs(edgeSuccess) < 1.5)) {
           isStrongSignal = true;
@@ -1013,7 +1317,7 @@ function showWeeklyPredictions() {
     let result_html = '';
     if (g.completed && g.home_points !== null && g.away_points !== null) {
       result_html = `${g.away_points}–${g.home_points}`;
-      if (hasVegas) {
+      if (atsLive) {
         const coverMargin = (g.home_points - g.away_points) - (-g.spread);
         if (Math.abs(coverMargin) < 0.05) {
           result_html += ' <span class="sub">Push</span>';
@@ -1052,6 +1356,8 @@ function showWeeklyPredictions() {
       spread: g.spread,
       edge,
       hasVegas,
+      atsLive,
+      atsGated,
       modelsAgreeATS,
       isStrongSignal,
       atsPick,
@@ -1074,12 +1380,15 @@ function showWeeklyPredictions() {
   if (unsimulated.length) scheduleScriptFill(unsimulated);
   $('weekly-note').textContent = weeklyLabel +
     (unsimulated.length ? ` · simulating ${unsimulated.length} more…` : '.') + ` ` +
-    `Click any matchup to open in the Matchup Predictor. Two different mixes: To win is the composite, weighted by ` +
-    `week to pick winners, while Model line and Edge use the mix fitted to be most accurate on the margin itself ` +
-    `(37% game script, 31% success Elo, 26% score Elo, 6% EPA). Margins indicate predicted points for the favorite. ` +
-    `On the 1,550 FBS-vs-FBS games from 2024-25 that carry a closing line, nothing here beat it: the margin mix went ` +
-    `52.8% against the spread where 52.4% breaks even at -110, no two models were separable from each other, and ` +
-    `Vegas predicted margins more accurately than every one of them (11.9 points of error against 12.4). ` +
+    `Click any matchup to open in the Matchup Predictor. Two different questions, so two different fits: To win is ` +
+    `the composite, weighted by week to pick winners, while Model line and Edge come from a fit of the cover itself ` +
+    `\u2014 the final margin's distance from the line \u2014 on the three current-season models and the line together, ` +
+    `with separate coefficients for in-conference, non-conference and FCS-vs-FCS games. Margins indicate predicted ` +
+    `points for the favorite. It stays blank before week 3, where the models have no season behind them and add ` +
+    `nothing to the line. On the 7,964 games from week 3 on since 2014 that carry a closing line, held out one ` +
+    `season at a time, that fit picks 51.7% against the spread where 52.4% breaks even at -110 \u2014 better than ` +
+    `the margin blend it replaced (50.5%) and still short. Vegas predicts margins more accurately than every ` +
+    `model here. ` +
     `Treat the badges as a description of the models, not a betting edge.`;
 }
 
@@ -1176,6 +1485,9 @@ async function loadSeason(season) {
   // projected scores are simulated in the browser; older seasons may not have the parameters
   state.score = await getJSON(`${base}/score.json`).catch(() => null);
   state.script = await getJSON(`${base}/script.json`).catch(() => null);
+  // A season that was never fetched for, or one old enough that the report has gone, simply has
+  // no panel - the matchup still reads the same without it.
+  state.injuries = await getJSON(`${base}/injuries.json`).catch(() => null);
   scriptCache.clear();
   fillConferences();
   fillTeamSelects();

@@ -90,6 +90,20 @@ const rankColumns = [
   { key: 'rank', label: 'Rk', defaultSort: true },
   { key: 'team', label: 'Team', text: true, cls: 'team', render: (t) => `${t.team}<span class="sub">${t.conference ?? ''}</span>` },
   { key: 'wins', label: 'W-L', render: (t) => `${t.wins}-${t.losses}` },
+  // The simulated round robin: every rated team against the whole 138-team FBS field on a neutral
+  // field. Blank for a season round_robin.py has not been run for, which is every season before
+  // 2026 so far. Not on the 0-100 scale: a win percentage and a points total are already
+  // readable as themselves, and stretching them to the historical extremes would only hide that.
+  { key: 'sim_win_pct', label: 'Sim win%', pct: true, rankKey: 'sim_rank',
+    title: 'Share of games won in a simulated round robin against all 138 FBS teams, neutral field. An FBS team plays the other 137, an FCS team all 138 - which is why almost every FCS team sits near zero, since the question asked of them is how often they would beat an FBS team' },
+  { key: 'sim_points_for', label: 'Sim PF', digits: 1, rankKey: 'sim_off_rank',
+    title: 'Mean points scored per game in that round robin - the offensive rating' },
+  { key: 'sim_points_against', label: 'Sim PA', digits: 1, rankKey: 'sim_def_rank',
+    title: 'Mean points allowed per game in that round robin - the defensive rating. Fewer is better and the rank is ordered that way' },
+  { key: 'sim_sd_for', label: 'Off var', digits: 1,
+    title: "Standard deviation of points scored across the round robin, so a LOWER number is the more consistent offence. Part of it is the team's own game-to-game volatility and part is the spread in who it played; round_robin.json carries those two separately" },
+  { key: 'sim_sd_against', label: 'Def var', digits: 1,
+    title: 'Standard deviation of points allowed across the round robin; lower is the more consistent defence' },
   { key: 'rating', label: 'Rating', signed: true, scale: true, title: 'Average of the EPA and play-success Elo ratings. 0-100 against every rating in the seasons the dashboard holds; hover for the points it stands for' },
   { key: 'epa_rating', label: 'EPA', signed: true, scale: true, rankKey: 'epa_rank', title: 'Opponent-adjusted expected points added, on the 0-100 scale' },
   { key: 'success_points', label: 'Success Elo', signed: true, scale: true, rankKey: 'success_rank', title: 'Play-success Elo (outcome = win chance implied by share of plays won), on the 0-100 scale' },

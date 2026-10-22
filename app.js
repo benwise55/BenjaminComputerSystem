@@ -104,7 +104,7 @@ const rankColumns = [
     title: "Standard deviation of points scored across the round robin, so a LOWER number is the more consistent offence. Part of it is the team's own game-to-game volatility and part is the spread in who it played; round_robin.json carries those two separately" },
   { key: 'sim_sd_against', label: 'Def var', digits: 1,
     title: 'Standard deviation of points allowed across the round robin; lower is the more consistent defence' },
-  { key: 'rating', label: 'Rating', signed: true, scale: true, title: 'Average of the EPA and play-success Elo ratings. 0-100 against every rating in the seasons the dashboard holds; hover for the points it stands for' },
+  { key: 'rating', label: 'Rating', signed: true, scale: true, title: 'Mean of the play-success Elo, the score Elo and the simulated round robin, each centred on an average FBS team and in points per game. A season without a round robin falls back to the other two, so the column reads the same across every season; hover for the points it stands for. The three disagree on how far FCS sits below FBS - 16, 20 and 33 points - so the FCS half sits about five points lower where the simulation is included' },
   { key: 'epa_rating', label: 'EPA', signed: true, scale: true, rankKey: 'epa_rank', title: 'Opponent-adjusted expected points added, on the 0-100 scale' },
   { key: 'success_points', label: 'Success Elo', signed: true, scale: true, rankKey: 'success_rank', title: 'Play-success Elo (outcome = win chance implied by share of plays won), on the 0-100 scale' },
   { key: 'elo_points', label: 'Score Elo', signed: true, scale: true, rankKey: 'elo_rank', title: 'Season_Analyzer Elo score predictor, on the 0-100 scale (reference; not in Rating)' },

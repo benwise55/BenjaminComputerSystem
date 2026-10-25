@@ -422,7 +422,9 @@ class ScriptGame {
                                + INTERCEPTION_LOGIT + goalInt);
     if (u < incomplete + intercept) return ['interception', 0];
     if (Math.random() < logistic(logit(L.sack) + this.shift('sack') + sackShift + goalSack)) {
-      return ['sack', Math.round(L.sack_mean + gauss() * L.sack_sd)];
+      // the matchup moves the sack's yardage as well as its rate; see the sack_yards note in
+      // game_script.py's GAP_MODELS. Mean only - the spread stays league-wide.
+      return ['sack', Math.round(L.sack_mean + this.shift('sack_yards') + gauss() * L.sack_sd)];
     }
     return ['complete', this.atMarker(down, toGo, toGoal,
                                       this.completion(this.shift('completion') + gainShift + fieldShift + goalComp, fieldSpread))];
@@ -583,6 +585,21 @@ class ScriptGame {
         }
       }
 
+      // WHAT THIS DOES NOT CARRY. python charges every flag to the side that gave the yards and
+      // keeps a per-side rate: the host is flagged less (home_terms.penalty), and the side that is
+      // WINNING is flagged more (pen_state, a shift per margin band per quarter group per role).
+      // Neither is mirrored here, and neither can be - this model has no side to charge, it only
+      // moves the drive, and it keeps no per-team penalty count for either to show up in. Both are
+      // redistributions between the two sides that leave the game's own flag rate alone, which is
+      // the only thing this loop reads, so leaving them out costs the drive nothing at first order.
+      //
+      // pen_yard_tilt, which reweights the SIZE of a flag the same way, is a closer call: this
+      // model does know the net's sign, which is the role, and it has the margin and the quarter,
+      // so it could apply it. It is left out because the tilt is levelled within each role to
+      // leave that role's own mean yardage alone, so what it changes is the correlation between a
+      // penalty's size and the score - which this model keeps no statistic for. The drive still
+      // feels it in python, through bigger flags against a defence protecting a lead, so this is a
+      // real divergence; it is of the same order as the 0.26% the state table moved total points.
       if (Math.random() < this.pen.noplay) {               // the snap doesn't count
         const [net, auto] = this.drawPenalty('noplay', toGoal);
         toGoal -= net;
@@ -600,7 +617,10 @@ class ScriptGame {
       const fumbleShare = L.fumble_td_share[kind];
       if (fumbleShare !== undefined && yards > -(100 - toGoal) && yards < toGoal) {
         const [fa, fk] = L.turnover_logit[kind];
-        if (Math.random() < logistic(fa + fk * aggression(L, down, toGo, margin, quarter))) {
+        // The fumble term, which did not exist on either side until fit_teams started fitting one:
+        // the rate was the league average in every matchup, here and in python alike.
+        if (Math.random() < logistic(fa + fk * aggression(L, down, toGo, margin, quarter)
+                                     + this.shift('fumble'))) {
           return Math.random() < fumbleShare ? ['fumble_td', null, left] : ['fumble', toGoal - yards, left];
         }
       }

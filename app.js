@@ -36,6 +36,38 @@ function scoreText(row, column) {
   return `<span class="${tone(value)}" title="${raw}">${score.toFixed(1)}</span>`;
 }
 
+// THE RATING, as the page shows it: the plain average of the three numbers beside it in the row -
+// the simulated win percentage, the score Elo and the play-success Elo - all on the same 0-100
+// scale. Computed here rather than carried in the payload so it cannot drift from the columns it
+// averages; a rating that does not match the row it sits in is a rating nobody can check. A
+// season with no round robin averages the two Elos, which is what makes the simulation optional.
+function displayRating(t) {
+  const parts = [scaled('success_points', t.success_points), scaled('elo_points', t.elo_points)];
+  if (t.sim_win_pct !== null && t.sim_win_pct !== undefined) parts.push(100 * t.sim_win_pct);
+  const have = parts.filter((p) => p !== null && p !== undefined && !Number.isNaN(p));
+  return have.length ? have.reduce((a, b) => a + b, 0) / have.length : null;
+}
+
+// Ranks on that composite, over whichever teams the filters leave on screen, so the Rk column and
+// the Rating column cannot disagree with each other or with the order of the rows.
+function withDisplayRating(rows) {
+  const out = rows.map((t) => ({ ...t, display_rating: displayRating(t) }));
+  out.filter((t) => t.display_rating !== null)
+     .sort((a, b) => b.display_rating - a.display_rating)
+     .forEach((t, i) => { t.display_rank = i + 1; });
+  return out;
+}
+
+// The same composite's rank within a team's division, for pages that show one team at a time and
+// so cannot rank against the rows beside it.
+function displayRank(t) {
+  const mine = displayRating(t);
+  if (mine === null) return '';
+  const better = (state.teams || []).filter((x) => division(x) === division(t))
+    .filter((x) => { const v = displayRating(x); return v !== null && v > mine; }).length;
+  return `#${better + 1}${division(t) === 'FCS' ? ' FCS' : ''}`;
+}
+
 // the rankings table's version, which appends the plain rank the table shows
 function scoreCell(row, column) {
   const rank = column.rankKey ? row[column.rankKey] : null;
@@ -87,7 +119,7 @@ function renderTable(table, rows, columns, sortKey) {
 // ---------------------------------------------------------------- rankings
 
 const rankColumns = [
-  { key: 'rank', label: 'Rk', defaultSort: true },
+  { key: 'display_rank', label: 'Rk', defaultSort: true },
   { key: 'team', label: 'Team', text: true, cls: 'team', render: (t) => `${t.team}<span class="sub">${t.conference ?? ''}</span>` },
   { key: 'wins', label: 'W-L', render: (t) => `${t.wins}-${t.losses}` },
   // The simulated round robin: every rated team against the whole 138-team FBS field on a neutral
@@ -104,10 +136,11 @@ const rankColumns = [
     title: "Standard deviation of points scored across the round robin, so a LOWER number is the more consistent offence. Part of it is the team's own game-to-game volatility and part is the spread in who it played; round_robin.json carries those two separately" },
   { key: 'sim_sd_against', label: 'Def var', digits: 1,
     title: 'Standard deviation of points allowed across the round robin; lower is the more consistent defence' },
-  { key: 'rating', label: 'Rating', signed: true, scale: true, title: 'Mean of the play-success Elo, the score Elo and the simulated round robin, each centred on an average FBS team and in points per game. A season without a round robin falls back to the other two, so the column reads the same across every season; hover for the points it stands for. The three disagree on how far FCS sits below FBS - 16, 20 and 33 points - so the FCS half sits about five points lower where the simulation is included' },
+  { key: 'display_rating', label: 'Rating', digits: 1, rankKey: 'display_rank', title: 'The average of the three 0-100 numbers in this row: the simulated win percentage, the score Elo and the play-success Elo. Add them up and divide by three and you get this. A season with no round robin averages the two Elos instead' },
   { key: 'epa_rating', label: 'EPA', signed: true, scale: true, rankKey: 'epa_rank', title: 'Opponent-adjusted expected points added, on the 0-100 scale' },
   { key: 'success_points', label: 'Success Elo', signed: true, scale: true, rankKey: 'success_rank', title: 'Play-success Elo (outcome = win chance implied by share of plays won), on the 0-100 scale' },
-  { key: 'elo_points', label: 'Score Elo', signed: true, scale: true, rankKey: 'elo_rank', title: 'Season_Analyzer Elo score predictor, on the 0-100 scale (reference; not in Rating)' },
+  { key: 'elo_points', label: 'Score Elo', signed: true, scale: true, rankKey: 'elo_rank', title: 'Season_Analyzer Elo score predictor, in points per game against an average FBS team, on the 0-100 scale. One of the three terms the Rating averages' },
+  { key: 'sim_margin', label: 'Script', signed: true, scale: true, rankKey: 'sim_margin_rank', title: "The simulated round robin's mean margin - points scored less points allowed against the whole FBS field. The third term the Rating averages, and blank for a season with no round robin, where the Rating falls back to the other two" },
   { key: 'offense', label: 'EPA off', signed: true, scale: true, rankKey: 'offense_rank' },
   { key: 'defense', label: 'EPA def', signed: true, scale: true, rankKey: 'defense_rank' },
   { key: 'success_off', label: 'Succ off', signed: true, scale: true, rankKey: 'success_off_rank',
@@ -137,8 +170,9 @@ function showRankings() {
   const rows = state.teams
     .filter((t) => (!level || division(t) === level) && (!query || t.team.toLowerCase().includes(query)) && (!conference || t.conference === conference))
     .map((t) => (level || !t.overall ? t : { ...t, ...t.overall }));
-  if (!state.sort.rankings) state.sort.rankings = { key: 'rank', dir: 1 };
-  renderTable($('rankings-table'), rows, rankColumns, 'rankings');
+  const ranked = withDisplayRating(rows);
+  if (!state.sort.rankings) state.sort.rankings = { key: 'display_rank', dir: 1 };
+  renderTable($('rankings-table'), ranked, rankColumns, 'rankings');
   const m = state.model;
   const early = m.calibration_season !== m.season;
   const span = state.seasons?.length ? `${state.seasons[0]}-${state.seasons[state.seasons.length - 1]}` : 'every season here';
@@ -723,11 +757,12 @@ function showPrediction() {
   // Rows with a key are on the rankings table's 0-100 scale, with the rating they came from on
   // hover; the rest are not ratings and stay as they are.
   const rows = [
-    { label: 'Rating (average)', key: 'rating', rank: (t) => rk(t) },
+    { label: 'Rating (average of the three below)', value: (t) => fmt.num(displayRating(t), 1), rank: (t) => displayRank(t) },
+    { label: 'Simulated win % vs the FBS field', value: (t) => fmt.pct(t.sim_win_pct), rank: (t) => rk(t, 'sim_rank') },
     { label: 'EPA rating', key: 'epa_rating', rank: (t) => rk(t, 'epa_rank') },
     { label: 'Success Elo', key: 'success_points', rank: (t) => rk(t, 'success_rank') },
     { label: 'Success Elo tier', value: (t) => fmt.num(t.success_tier, 2) },
-    { label: 'Score Elo (reference)', key: 'elo_points', rank: (t) => rk(t, 'elo_rank') },
+    { label: 'Score Elo', key: 'elo_points', rank: (t) => rk(t, 'elo_rank') },
     { label: 'Offense', key: 'offense', rank: (t) => rk(t, 'offense_rank') },
     { label: 'Defense', key: 'defense', rank: (t) => rk(t, 'defense_rank') },
     { label: 'Success Elo offense', key: 'success_off', rank: (t) => rk(t, 'success_off_rank') },

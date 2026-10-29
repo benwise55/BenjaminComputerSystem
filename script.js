@@ -296,7 +296,18 @@ class ScriptGame {
     this.mods = mods;                                      // [team A, team B]
     this.home = home;                                      // 0, 1 or null
     this.score = [0, 0];
-    this.halfSnaps = (this.L.snaps_per_game + (mods[0].pace ?? 0) + (mods[1].pace ?? 0)) / 2;
+    // A half is clock.half seconds by rule, so pace is a multiplier on what a snap costs rather
+    // than a budget of snaps handed out in advance. See CLOCK_PACE_SNAPS in game_script.py.
+    //
+    // This arithmetic is deliberately UNCHANGED now that the pace is per season. Python writes
+    // CLOCK_PACE_SNAPS / snaps_per_game into clock.pace, and ref IS snaps_per_game, so
+    // (pace * ref) / want is CLOCK_PACE_SNAPS / want - the same number python uses. Do not
+    // "simplify" it to drop ref, and do not read a season-independent constant into clock.pace.
+    this.C = this.L.clock || null;
+    const ref = this.L.snaps_per_game;
+    const want = ref + (mods[0].pace ?? 0) + (mods[1].pace ?? 0);
+    this.pace = this.C ? (this.C.pace * ref) / Math.max(want, 40) : 1;
+    this.timeouts = [3, 3];
     this.run = table(this.L.run_yards);
     this.completion = table(this.L.completion_yards);
     this.kickoffTo = sampler(this.L.kickoff_to);
@@ -455,13 +466,75 @@ class ScriptGame {
     return [f.shift[i], f.spread[i], f.incomplete ? f.incomplete[i] : 0];
   }
 
-  // The closing snaps of a half. The only clock here is the snap budget, so the hurry-up and the
-  // kick it sets up are fitted on snaps remaining: under two minutes real pass share jumps to
-  // 64.6% from a baseline near 48%, and 41% of second-quarter field goals come in that minute.
+  // The closing seconds of a half, banded. Under two minutes real pass share jumps to 64.6% from
+  // a baseline near 48%, and 41% of second-quarter field goals come in that minute.
   endShift(left, which) {
+    // Band width 1 without a clock in the payload: `left` is then snaps, as it used to be, so an
+    // older script.json keeps reading the cells it was fitted on rather than 15 of them at a time.
     const e = this.L.endhalf, n = this.L.end_snaps ?? 8;
-    if (!e || left == null || left >= n || left < 0) return 0;
-    return e[which][Math.trunc(left)] ?? 0;
+    const w = this.C ? (this.L.end_band ?? 15) : 1;
+    if (!e || left == null || left < 0 || left >= n * w) return 0;
+    return e[which][Math.trunc(left / w)] ?? 0;
+  }
+
+  // What a snap costs the clock. A play that stops it costs only its own action; one that leaves
+  // it running costs that plus the runoff, and the runoff is what the two sides fight over.
+  // Mirrors Game.clock_used / Game.runoff in game_script.py.
+  clockUsed(kind, margin, left, scored = false) {
+    const C = this.C;
+    if (!C) return 1;
+    let mean, sd;
+    if (scored || C.stop[kind] !== undefined) {
+      mean = scored ? C.stop.score : C.stop[kind];
+      sd = C.stop_sd;
+    } else {
+      mean = this.runoff(margin, left);
+      sd = C.run_sd;
+    }
+    let cost = Math.max(mean * this.pace * (1 + sd * gauss()), 1);
+    // The clock stops at the end of a quarter, so a snap cannot spend time its quarter does not
+    // have: a play starting with a second left in the first costs a second, not a full runoff.
+    // Mirrors the cap in Game.clock_used. Overtime passes left <= 0, where a cap would ADD time.
+    if (left > 0) cost = Math.min(cost, left - (left > C.half / 2 ? C.half / 2 : 0));
+    return cost;
+  }
+
+  runoff(margin, left) {
+    const C = this.C;
+    if (this.halfNo === 0) return left <= C.hurry_left ? C.hurry_h1 : C.run;
+    if (margin >= C.stall_margin) return left <= C.stall_left ? C.stall : C.lead;
+    if (left > C.stall_left) return C.run;
+    const base = left <= C.hurry_left ? C.hurry : C.chase;
+    const [g0, g1] = C.giveup;
+    let f = (-margin - g0) / (g1 - g0);
+    f = f < 0 ? 0 : (f > 1 ? 1 : f);
+    return base + (C.run - base) * f;
+  }
+
+  // Whether a side stops the clock here, and takes one off its own stock. Before halftime it is
+  // whoever has the ball; after it, mostly the side that is behind - but only 70% of the time, and
+  // charging every one to the trailing side drains its stock twice as fast as the real thing.
+  spendTimeout(team, margin, left) {
+    const C = this.C;
+    if (!C || left > C.to_left) return 0;
+    const chance = left <= C.hurry_left
+      ? (Math.abs(margin) <= C.to_close ? C.to_close_chance : C.to_chance)
+      : C.to_mid;
+    if (Math.random() >= chance) return 0;
+    let who;
+    if (this.halfNo === 0 || margin === 0) who = team;
+    else {
+      const behind = margin < 0 ? team : 1 - team;
+      who = Math.random() < C.to_trailing ? behind : 1 - behind;
+    }
+    if (this.timeouts[who] <= 0) return 0;
+    this.timeouts[who] -= 1;
+    return C.to_saves * this.pace;
+  }
+
+  burnTimeout(team) {
+    const C = this.C;
+    if (C && Math.random() < C.to_early && this.timeouts[team] > 0) this.timeouts[team] -= 1;
   }
 
   goalShift(toGoal) {
@@ -535,14 +608,15 @@ class ScriptGame {
     return [net, Math.random() < pAuto];
   }
 
-  // one possession: returns [outcome, the other team's own yard line or null, snaps left]
+  // one possession: returns [outcome, the other team's own yard line or null, seconds left]
   possession(team, ownLine, left, overtime = 0) {
     const L = this.L;
     let down = 1, toGoal = 100 - ownLine, toGo = Math.min(10, toGoal);
     this.off = team; this.def = 1 - team;
     while (overtime || left > 0) {
       const margin = this.score[team] - this.score[1 - team];
-      const quarter = overtime ? 4 : 2 * this.halfNo + (left > this.halfLength / 2 ? 1 : 2);
+      const half = this.C ? this.C.half : this.halfLength;
+      const quarter = overtime ? 4 : 2 * this.halfNo + (left > half / 2 ? 1 : 2);
       if (down === 4) {
         let [punt, fg, go] = fourthProbabilities(L, toGoal, toGo, margin, quarter);
         const kick = toGoal <= LAST_KICK_TO_GOAL ? this.endShift(left, 'fg') : 0;
@@ -575,12 +649,15 @@ class ScriptGame {
         if (choice === 'punt') {
           const draw = this.fromBand(this.punts, toGoal);
           let spot = draw ? draw() : 30;
+          left -= this.clockUsed('punt', margin, left);
           if (spot < 0) return ['punt_td', null, left];
           spot = Math.min(Math.max(Math.round(spot + this.shift('punt')), 1), 99);
           return ['punt', spot, left];
         }
         if (choice === 'fg') {
-          if (Math.random() < this.fgChance(toGoal)) return ['fg', 25, left];
+          const good = Math.random() < this.fgChance(toGoal);
+          left -= this.clockUsed(good ? 'fg' : 'missed_fg', margin, left);
+          if (good) return ['fg', 25, left];
           return ['missed_fg', Math.max(20, toGoal), left];
         }
       }
@@ -602,14 +679,18 @@ class ScriptGame {
       // real divergence; it is of the same order as the 0.26% the state table moved total points.
       if (Math.random() < this.pen.noplay) {               // the snap doesn't count
         const [net, auto] = this.drawPenalty('noplay', toGoal);
+        // a no-play penalty replaces the snap but not the time it took; see game_script.py
+        left -= this.clockUsed('penalty', margin, left);
         toGoal -= net;
         if (net >= toGo || auto) { down = 1; toGo = Math.min(10, toGoal); } else { toGo -= net; }
         continue;
       }
 
       let [kind, yards] = this.play(down, toGo, margin, quarter, toGoal, left);
-      left -= 1;
+      // The clock is charged once the outcome is settled: a turnover or a score stops it, a tackle
+      // in the field does not, so the turnover draws come first and each pays its own cost.
       if (kind === 'interception') {
+        left -= this.clockUsed('interception', margin, left);
         const draw = this.fromBand(this.ints, toGoal);
         const spot = draw ? draw() : 30;
         return spot < 0 ? ['int_td', null, left] : ['interception', spot, left];
@@ -621,6 +702,7 @@ class ScriptGame {
         // the rate was the league average in every matchup, here and in python alike.
         if (Math.random() < logistic(fa + fk * aggression(L, down, toGo, margin, quarter)
                                      + this.shift('fumble'))) {
+          left -= this.clockUsed('fumble', margin, left);
           return Math.random() < fumbleShare ? ['fumble_td', null, left] : ['fumble', toGoal - yards, left];
         }
       }
@@ -629,6 +711,11 @@ class ScriptGame {
       if (yards > -(100 - toGoal) && yards < toGoal && Math.random() < this.pen.add / (1 - this.pen.noplay) / (this.L.pen_add_eligible || 1)) {
         const drawn = this.drawPenalty('add', toGoal - yards);
         yards += drawn[0]; auto = drawn[1];
+      }
+      const scored = yards >= toGoal || yards <= -(100 - toGoal);
+      left -= this.clockUsed(kind, margin, left, scored);
+      if (!scored && (!this.C || this.C.stop[kind] === undefined)) {
+        left += this.spendTimeout(team, margin, left);
       }
       const gainedFirst = yards >= toGo || auto;
       if (yards >= toGoal) return ['td', 25, left];
@@ -681,11 +768,14 @@ class ScriptGame {
 
   half(receiving) {
     this.halfNo = this.halfNo === undefined ? 0 : this.halfNo + 1;
-    const whole = Math.floor(this.halfSnaps);
-    this.halfLength = whole + (Math.random() < this.halfSnaps - whole ? 1 : 0);
+    // Thirty minutes, by rule. How many snaps fit in them is the game's business.
+    this.halfLength = this.C ? this.C.half : 66;
     let left = this.halfLength;
+    this.timeouts = [this.C ? this.C.to_per_half : 3, this.C ? this.C.to_per_half : 3];
     let [team, start] = this.receive(1 - receiving, receiving, this.score[receiving] - this.score[1 - receiving], 2 * this.halfNo + 1);
+    if (this.C) left -= this.clockUsed('kickoff', 0, left);
     while (left > 0) {
+      if (this.C && left > this.C.to_left) { this.burnTimeout(team); this.burnTimeout(1 - team); }
       const [outcome, next, remaining] = this.possession(team, start, left);
       left = remaining;
       const other = 1 - team;
@@ -693,18 +783,14 @@ class ScriptGame {
       else if (outcome === 'fg') this.score[team] += 3;
       else if (outcome === 'safety') this.score[other] += 2;
       else if (DEFENSIVE_TDS.has(outcome)) this.score[other] += 7;
-      // A side sitting on a big lead late lets the clock go, which costs snaps nobody runs. Late
-      // in the final period only: keyed on the margin as it stands, it also fired in games that
-      // tightened up, and those are the LONGEST real ones. The budget itself is fitted on close
-      // FBS games, so without this blowouts came out a snap a team long.
-      const bl = this.L.blowout;
-      if (bl && bl[1] && this.halfNo >= 1 && left < this.halfLength / 2
-          && Math.abs(this.score[0] - this.score[1]) >= bl[0] && Math.random() < bl[1]) {
-        left = Math.max(0, left - 1);
-      }
+      // Nothing is added back here any more. The snap bonus after a score and the blowout burn
+      // were both standing in for a clock: a score stops it and brings a kickoff, and a side
+      // sitting on a lead spends clock.stall a snap against a chaser's clock.hurry, so both
+      // gradients now come out of the clock itself. See Game.half in game_script.py.
       if (outcome === 'end') break;
       if (['td', 'fg', 'safety'].includes(outcome) || DEFENSIVE_TDS.has(outcome)) {
         const kicking = DEFENSIVE_TDS.has(outcome) ? other : team;
+        left -= this.clockUsed('kickoff', this.score[team] - this.score[other], left);
         const quarter = 2 * this.halfNo + (left > this.halfLength / 2 ? 1 : 2);
         [team, start] = this.receive(kicking, 1 - kicking, this.score[kicking] - this.score[1 - kicking], quarter);
       } else {

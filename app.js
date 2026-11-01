@@ -212,6 +212,29 @@ function probit(p) {
   return (((((a[0] * r + a[1]) * r + a[2]) * r + a[3]) * r + a[4]) * r + a[5]) * q / (((((b[0] * r + b[1]) * r + b[2]) * r + b[3]) * r + b[4]) * r + 1);
 }
 
+// A success tier difference becomes a MARGIN here directly, on its division pairing's own terms -
+// elo_model.success_margin_terms, mirrored because a browser has no python to import. It used to be
+// margin_sd * probit(successP), and that saturates: the probit is 1.75 at a 96% win chance, so with
+// margin_sd near 14 no win probability could express an expected margin past about 24 points, and
+// FBS-vs-FCS games average 32.9. That conversion was 8.5 of the 8.8 points those games were missed
+// by. games.json's model_margin is built the same way, in build_dashboard_data.py.
+const SUCCESS_MARGIN_TERMS = { fbs: [1.38, 6.90], fcs: [0.69, 11.78], cross: [12.73, 5.27], step: [23.41, 11.68] };
+// An asymmetric pairing is oriented on the HIGHER division's side, not the home side: nearly every
+// one of those games is at the stronger team's ground, so a home-oriented intercept would really be
+// measuring "the home team is the FBS team". The team table carries FBS and FCS teams only, so
+// `step` - two teams from below FCS - cannot arise on this side; it is here to match the python.
+const MARGIN_RANK = { FBS: 2, FCS: 1 };
+
+// `diff` is the tier difference oriented towards `firstDivision`'s team, whether that team is at
+// home or away; the sign returned by the pairing puts the answer back in that same direction.
+function successEloMargin(diff, firstDivision, secondDivision) {
+  const f = MARGIN_RANK[firstDivision] ?? 0, s = MARGIN_RANK[secondDivision] ?? 0;
+  const pairing = f === s ? (f === 2 ? 'fbs' : 'fcs') : (f === 2 || s === 2 ? 'cross' : 'step');
+  const sign = f >= s ? 1 : -1;
+  const [level, slope] = SUCCESS_MARGIN_TERMS[pairing];
+  return sign * (level + slope * sign * diff);
+}
+
 // Team colours for the matchup bar: both teams wear their primary colour, unless the two are too
 // close to tell apart - then the visitor changes, like an away kit, to its secondary and failing
 // that to grey. At a neutral site Team A counts as the home side.
@@ -714,10 +737,71 @@ function injuryBlock(a, b) {
   </div>`;
 }
 
+// A game in progress, read straight off the panel. Returns the state ScriptGame.resume wants -
+// the field names are Game.resume's in game_script.py, so the browser and the backtest describe a
+// scoreboard the same way - or null when the panel is shut. Every field is clamped rather than
+// rejected: a half-typed clock should leave the view showing something, not blank it.
+const LIVE_SIMS = 2000;      // a finish is a fraction of a game, so this costs little and the
+                             // win chance is counted rather than fitted, which wants the sims
+
+function liveState() {
+  const panel = $('live');
+  if (!panel || !panel.open) return null;
+  const num = (id, lo, hi, dflt) => {
+    const v = Number($(id)?.value);
+    return Number.isFinite(v) ? Math.min(Math.max(Math.round(v), lo), hi) : dflt;
+  };
+  const recv = $('live-recv')?.value ?? '';
+  // M:SS, or plain seconds when there is no colon
+  const typed = ($('live-clock')?.value || '').trim();
+  const [mins, secs] = typed.includes(':') ? typed.split(':') : ['0', typed];
+  const clock = Math.min(Math.max(Math.round((Number(mins) || 0) * 60 + (Number(secs) || 0)), 0), 900);
+  return {
+    quarter: num('live-quarter', 1, 4, 1),
+    clock,
+    score: [num('live-score-a', 0, 99, 0), num('live-score-b', 0, 99, 0)],
+    offense: num('live-offense', 0, 1, 0),
+    own_line: num('live-own', 1, 99, 25),
+    down: num('live-down', 1, 4, 1),
+    to_go: num('live-togo', 1, 99, 10),
+    timeouts: [num('live-to-a', 0, 3, 3), num('live-to-b', 0, 3, 3)],
+    // Who takes the second-half kickoff. The scoreboard does not say it and the simulator cannot
+    // infer it - it is settled at the coin toss - so resume() flips a coin for it, INDEPENDENTLY
+    // in every finish, whenever it is not given. That is unbiased: the answer comes out the
+    // average of the two cases. But anyone watching the game knows which it is, so leaving it out
+    // throws away information rather than lacking it, and it widens the spread of the estimate on
+    // top of that. It is worth the same in every first-half state - the second-half opening drive
+    // is entirely ahead of you at 15:00 of the first just as much as at 0:30 of the second - so
+    // this is not an end-of-half correction, it applies to every first-half prediction.
+    // Left out of the state entirely when the viewer does not know either, which restores the flip.
+    ...(recv === '0' || recv === '1' ? { second_receiving: Number(recv) } : {}),
+  };
+}
+
+// "Team A" is the input's name, not a name anyone reads: the panel wears the two chosen teams.
+function nameLivePanel(nameA, nameB) {
+  const put = (id, text) => {
+    const el = $(id);
+    if (el) el.firstChild.textContent = text;
+  };
+  put('live-score-a-label', `${nameA} `);
+  put('live-score-b-label', `${nameB} `);
+  put('live-to-a-label', `${nameA} timeouts `);
+  put('live-to-b-label', `${nameB} timeouts `);
+  const sel = $('live-offense');
+  if (sel) { sel.options[0].textContent = nameA; sel.options[1].textContent = nameB; }
+  const rec = $('live-recv');            // [not known, A, B] - the first option wears no name
+  if (rec) { rec.options[1].textContent = nameA; rec.options[2].textContent = nameB; }
+}
+
+const LIVE_FIELDS = ['live-quarter', 'live-clock', 'live-score-a', 'live-score-b', 'live-offense',
+                     'live-own', 'live-down', 'live-togo', 'live-to-a', 'live-to-b', 'live-recv'];
+
 function showPrediction() {
   const byName = Object.fromEntries(state.teams.map((t) => [t.team, t]));
   const a = byName[state.matchup['team-a']], b = byName[state.matchup['team-b']];
   if (!a || !b) return;
+  nameLivePanel(a.team, b.team);
   const m = state.model;
   const site = $('site').value;
   const side = site === 'a' ? 1 : site === 'b' ? -1 : 0;
@@ -725,8 +809,9 @@ function showPrediction() {
   // Success Elo home field: success_home_tiers added to the home team's tier.
   const epaMargin = a.epa_rating - b.epa_rating + side * m.home_field_points;
   const epaP = normalCdf(epaMargin / m.margin_sd);
-  const successP = tierWin(a.success_tier - b.success_tier + side * (m.success_home_tiers ?? 0), m.randomness_factor);
-  const successMargin = m.margin_sd * probit(successP);
+  const successDiff = a.success_tier - b.success_tier + side * (m.success_home_tiers ?? 0);
+  const successP = tierWin(successDiff, m.randomness_factor);
+  const successMargin = successEloMargin(successDiff, division(a), division(b));
   const eloMargin = a.elo_points - b.elo_points + side * m.elo_home_points;
   const eloSd = m.elo_points_per_tier * Math.sqrt(a.elo_off_sd ** 2 + b.elo_def_sd ** 2 + b.elo_off_sd ** 2 + a.elo_def_sd ** 2);
   const eloP = normalCdf(eloMargin / eloSd);
@@ -735,6 +820,15 @@ function showPrediction() {
   const script = state.script
     ? scriptProjection(state.script, a.team, b.team, site, undefined, currentWeek(),
                        scheduleConditions(a.team, b.team))
+    : null;
+
+  // A game in progress belongs to the game-script model alone: it is the only one of the four that
+  // can be told where the ball is, so the blend below stays what it has always been - a view from
+  // before kickoff - and the live answer is shown as its own thing rather than mixed into it.
+  const liveSt = liveState();
+  const live = liveSt && state.script
+    ? scriptLive(state.script, a.team, b.team, site, liveSt, LIVE_SIMS,
+                 scheduleConditions(a.team, b.team))
     : null;
 
   // The mix for where the season has got to. Margins and win chances are weighted separately,
@@ -913,9 +1007,49 @@ function showPrediction() {
   const charts = `<div class="charts">${state.charts.map((c) =>
     `<figure class="chart"><figcaption>${c.caption}</figcaption><div class="plot"></div></figure>`).join('')}</div>`;
   const venue = site === 'neutral' ? 'neutral site' : site === 'a' ? `at ${a.team}` : `at ${b.team}`;
+  // What the simulator was told, read back in the words a broadcast would use, so a mistyped
+  // scoreboard is visible rather than silently changing the answer.
+  const liveBlock = (() => {
+    // the panel is open but this season's payload predates the clock, so there are no seconds to
+    // read a scoreboard into - say so rather than leaving the panel looking like it did nothing
+    if (!live) return liveSt
+      ? `<div class="live-out"><h4>Game in progress</h4><p class="subline">This season's simulator
+         payload was written before the game clock, so a scoreboard cannot be read into it. Re-run
+         <code>python3 game_script.py --export --season ${state.season}</code>.</p></div>`
+      : '';
+    const pA = live.p;
+    const front = pA >= 0.5 ? a.team : b.team, fp = pA >= 0.5 ? pA : 1 - pA;
+    const mm = Math.floor(liveSt.clock / 60), ss = String(liveSt.clock % 60).padStart(2, '0');
+    const ball = liveSt.offense === 0 ? a : b;
+    const spot = liveSt.own_line > 50 ? `the ${liveSt.offense === 0 ? b.team : a.team} ${100 - liveSt.own_line}`
+                                      : `its own ${liveSt.own_line}`;
+    return `
+    <div class="live-out">
+      <h4>Game in progress <span class="sub">game script model only</span></h4>
+      <p class="headline">${front} wins ${fmt.pct(fp)}</p>
+      <p class="subline">Q${liveSt.quarter} ${mm}:${ss} · <strong>${a.team} ${liveSt.score[0]} – ${b.team} ${liveSt.score[1]}</strong>` +
+      ` · ${ball.team} ${liveSt.down}${['st','nd','rd','th'][liveSt.down - 1]} & ${liveSt.to_go} at ${spot}` +
+      ` · timeouts ${liveSt.timeouts[0]}–${liveSt.timeouts[1]}</p>
+      <div class="probability">
+        <div class="a" style="${barStyle(colors.a)};width:${(100 * pA).toFixed(1)}%">${pA >= 0.12 ? `${a.team} ${fmt.pct(pA)}` : ''}</div>
+        <div class="b" style="${barStyle(colors.b)};width:${(100 * (1 - pA)).toFixed(1)}%">${1 - pA >= 0.12 ? `${fmt.pct(1 - pA)} ${b.team}` : ''}</div>
+      </div>
+      <p class="subline">Projected final: <strong>${a.team} ${live.a.toFixed(1)} – ${b.team} ${live.b.toFixed(1)}</strong>` +
+      ` (${live.margin >= 0 ? a.team : b.team} by ${Math.abs(live.margin).toFixed(1)}, spread ${live.spread.toFixed(1)});` +
+      ` ${fmt.pct(live.overtime)} of finishes reach overtime.</p>
+      <p class="subline sub">${LIVE_SIMS.toLocaleString()} finishes played out from this scoreboard, so the win chance carries about` +
+      ` ±${(100 * Math.sqrt(pA * (1 - pA) / LIVE_SIMS)).toFixed(1)} points of simulation noise. The rest of the game is played by each` +
+      ` team's season ratings: the model is told the score, not how the game got there, so a side playing far above its rating is` +
+      ` projected to come back to it. A kickoff is not a state it can hold - enter the receiving team at its own 25 instead - and` +
+      ` overtime has to be played, not resumed.${liveSt.quarter <= 2
+        ? ' In the first half the second-half kickoff is a coin flip here, because a scoreboard does not say who took the first one.'
+        : ''}</p>
+    </div>`;
+  })();
   $('prediction').innerHTML = `
     <div class="teams">${teamCard(a, 'a')}<div class="vs">vs<br><span>${venue}</span></div>${teamCard(b, 'b')}</div>
-    <p class="headline">${winner.team} by ${Math.abs(margin).toFixed(1)}</p>
+    ${liveBlock}
+    <p class="headline">${live ? 'Before kickoff: ' : ''}${winner.team} by ${Math.abs(margin).toFixed(1)}</p>
     ${scoreLine}
     ${scriptLine}
     <p class="subline">${weightOrder.map(([k, w]) => `${models[k].label} (${(100 * w).toFixed(0)}%): ${lean(models[k].margin, models[k].p)}`).join(' · ')}${
@@ -1290,7 +1424,7 @@ function showWeeklyPredictions() {
       epaP = normalCdf(epaMargin / m.margin_sd);
       const diff = h.success_tier - a.success_tier + side * (m.success_home_tiers ?? 0);
       successP = tierWin(diff, m.randomness_factor);
-      successMargin = m.margin_sd * probit(successP);
+      successMargin = successEloMargin(diff, division(h), division(a));
       blendMargin = (epaMargin + successMargin) / 2;
       blendP = (epaP + successP) / 2;
 
@@ -1580,6 +1714,18 @@ async function init() {
   });
   ['team-a', 'team-b'].forEach(setupCombo);
   $('site').addEventListener('change', showPrediction);
+  // The scoreboard panel sits outside #prediction, so it is wired once rather than on every
+  // render. toggle fires when the panel is opened or shut, which is what turns the live view on.
+  $('live')?.addEventListener('toggle', showPrediction);
+  let liveTyping = null;
+  const showPredictionSoon = () => {
+    clearTimeout(liveTyping);
+    liveTyping = setTimeout(showPrediction, 120);
+  };
+  LIVE_FIELDS.forEach((id) => {
+    const el = $(id);
+    el?.addEventListener(el.tagName === 'SELECT' ? 'change' : 'input', showPredictionSoon);
+  });
   $('player-search').addEventListener('input', showPlayers);
   $('player-min').addEventListener('input', showPlayers);
   $('season').addEventListener('change', (e) => loadSeason(Number(e.target.value)));

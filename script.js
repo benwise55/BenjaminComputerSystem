@@ -129,12 +129,26 @@ function aggression(L, down, toGo, margin, quarter) {
 // Offences run far more with the goal line in reach, and on 3rd or 4th and a yard, than the fitted
 // pass model knows: it has distance bands but no field position, so it called the same mix at the
 // opponent's 2 as at midfield. Zero on average over a season, so the overall pass share is the same.
+// The field-position correction takes TWO shapes, not one - see CALL_STEP_CENTRE in
+// game_script.py. `goal` is the shared curve and each down-and-distance cell takes its own
+// MULTIPLIER of it; `step` is a plateau across the offence's own half that falls through zero at
+// midfield, and each cell takes its own LOADING of that. A payload written before PARAMS_VERSION 56
+// has neither field, and reads back as a multiplier of 1 and no step, which is what it meant.
 function callShift(L, down, toGo, toGoal, margin, quarter) {
   const c = L.call;
   if (!c) return 0;
-  let g = toGoal == null ? 0 : c.goal[Math.min(Math.max(Math.trunc(toGoal), 1), 99)];
-  const row = c.cell[String(Math.trunc(down))];
-  g += row ? row[Math.min(Math.max(Math.trunc(toGo), 1), row.length) - 1] : 0;
+  const d = String(Math.trunc(down));
+  const row = c.cell[d];
+  const ix = Math.min(Math.max(Math.trunc(toGo), 1), row ? row.length : 40) - 1;
+  let g = 0;
+  if (toGoal != null) {
+    const tg = Math.min(Math.max(Math.trunc(toGoal), 1), 99);
+    const mult = c.mult && c.mult[d];
+    g += c.goal[tg] * (mult ? mult[Math.min(ix, mult.length - 1)] : 1);
+    const load = c.load && c.load[d];
+    if (c.step && load) g += c.step[tg] * load[Math.min(ix, load.length - 1)];
+  }
+  g += row ? row[Math.min(ix, row.length - 1)] : 0;
   // the score-margin block: tanh(-margin/MARGIN_SCALE) in aggression() is nearly saturated by a
   // single score, so the bands carry what it cannot - chiefly a team 4 to 8 down in the fourth,
   // and a late lead being protected harder than the fitted model protects it
@@ -162,7 +176,10 @@ function passChance(L, mods, down, toGo, margin, quarter, homeSign, homeTerms, t
     ? GOAL_PASS_SHIFT - GOAL_PASS_DEFENSE * ((dmods?.run_d ?? 0) + (dmods?.completion_d ?? 0)
                                              + (mods?.run_o ?? 0) + (mods?.completion_o ?? 0))
     : 0;
-  return logistic(base + aggression(L, down, toGo, margin, quarter) + (mods.pass ?? 0)
+  // and on every snap, what the defence is good AT rather than how good it is: a defence weaker
+  // through the air than on the ground gets thrown at. See PASS_TILT_DEFENSE in game_script.py.
+  const tilt = PASS_TILT_DEFENSE * ((dmods?.completion_d ?? 0) - (dmods?.run_d ?? 0));
+  return logistic(base + aggression(L, down, toGo, margin, quarter) + (mods.pass ?? 0) + tilt
                   + homeSign * (homeTerms.pass ?? 0) + callShift(L, down, toGo, toGoal, margin, quarter)
                   + goalPass + endPass);
 }
@@ -414,8 +431,12 @@ class ScriptGame {
     const goalInt = near ? GOAL_INT_LOGIT : 0;
     const goalComp = near ? GOAL_COMPLETION_SHIFT : 0;
     const [fieldShift, fieldSpread, fieldInc] = this.passFieldShift(toGoal);
+    // the fourth quarter has its own clock x lead table; everywhere else, and on a payload
+    // written before it existed, the shared closing-seconds one still applies
+    const clockPass = Math.trunc(quarter) === 4 && L.q4call ? this.q4Shift(margin, left)
+                                                            : this.endShift(left, 'pass');
     if (Math.random() >= passChance(L, this.mods[this.off], down, toGo, margin, quarter,
-                                    this.sign(this.off), this.homeTerms, toGoal, this.endShift(left, 'pass'),
+                                    this.sign(this.off), this.homeTerms, toGoal, clockPass,
                                     this.mods[this.def])) {
       return ['run', this.atMarker(down, toGo, toGoal, this.shortLoss(toGo,
                                    this.run(this.shift('run') + this.runShift(down, toGo) + goalRun, spread)))];
@@ -477,6 +498,30 @@ class ScriptGame {
     return e[which][Math.trunc(left / w)] ?? 0;
   }
 
+  // The fourth quarter's call, by lead and by seconds left in the half. It REPLACES endShift there
+  // (see Q4_CLOCK_BANDS in game_script.py): endhalf is fitted on the closing minutes of both halves
+  // pooled, and before halftime the hurry-up is unconditional while after it the same two minutes
+  // split hard on the score, so the shared table bumped a side protecting a lead UP by 0.31 where
+  // reality drops it to 0.07. A payload written before PARAMS_VERSION 57 has no q4call, and the
+  // caller falls back to endShift there, so an older script.json behaves exactly as it did.
+  q4Shift(margin, left) {
+    const t = this.L.q4call;
+    const mb = this.L.q4_margin_bands, cbs = this.L.q4_clock_bands;
+    if (!t || !mb || !cbs || left == null) return 0;
+    // right-closed in the lead, matching numpy's searchsorted(side='left') - 1: a lead sitting
+    // exactly on an edge belongs to the band BELOW it
+    let i = 0;
+    for (let k = 0; k < mb.length - 1; k++) if (margin > mb[k + 1]) i = k + 1;
+    i = Math.min(i, mb.length - 2);
+    // left-closed in the clock, counting up from zero
+    const x = Math.min(Math.max(left, 0), cbs[cbs.length - 1] - 1e-9);
+    let j = 0;
+    for (let k = 0; k < cbs.length - 1; k++) if (x >= cbs[k + 1]) j = k + 1;
+    j = Math.min(j, cbs.length - 2);
+    const row = t[i];
+    return (row && row[j]) ?? 0;
+  }
+
   // What a snap costs the clock. A play that stops it costs only its own action; one that leaves
   // it running costs that plus the runoff, and the runoff is what the two sides fight over.
   // Mirrors Game.clock_used / Game.runoff in game_script.py.
@@ -511,25 +556,36 @@ class ScriptGame {
     return base + (C.run - base) * f;
   }
 
-  // Whether a side stops the clock here, and takes one off its own stock. Before halftime it is
-  // whoever has the ball; after it, mostly the side that is behind - but only 70% of the time, and
-  // charging every one to the trailing side drains its stock twice as fast as the real thing.
+  // Whether a side stops the clock here, and takes one off its own stock. Each side is offered its
+  // own chance against its own deficit, measured apart: a defence stopping the clock to get the
+  // ball back is a different act from an offence stopping it to keep a drive alive. See the tables
+  // above TIMEOUT_LEFT in game_script.py for what they are and what the pooled rate got wrong.
+  // A side's own chance of stopping the clock, from its lead and the seconds left in the half.
+  // Mirrors timeout_chance in game_script.py.
+  timeoutChance(table, lead, left) {
+    const b = this.C.to_bands;
+    const col = left > b[0] ? 0 : (left > b[1] ? 1 : 2);
+    for (const [edge, rates] of table) if (edge === null || lead >= edge) return rates[col];
+    return 0;
+  }
+
   spendTimeout(team, margin, left) {
     const C = this.C;
-    if (!C || left > C.to_left) return 0;
-    const chance = left <= C.hurry_left
-      ? (Math.abs(margin) <= C.to_close ? C.to_close_chance : C.to_chance)
-      : C.to_mid;
-    if (Math.random() >= chance) return 0;
-    let who;
-    if (this.halfNo === 0 || margin === 0) who = team;
-    else {
-      const behind = margin < 0 ? team : 1 - team;
-      who = Math.random() < C.to_trailing ? behind : 1 - behind;
+    // a payload written before the measured table has no rates to read, and spends none
+    if (!C || !C.to_bands || left > C.to_left) return 0;
+    const h1 = this.halfNo === 0;
+    for (const [who, table, flat] of [[1 - team, C.to_def, C.to_h1_def],
+                                      [team, C.to_off, C.to_h1_off]]) {
+      if (this.timeouts[who] <= 0) continue;
+      // before halftime the deficit does not move it, so the flat rate is read off the clock
+      const lead = who === team ? margin : -margin;
+      const chance = h1 ? this.timeoutChance([[null, flat]], 0, left)
+                        : this.timeoutChance(table, lead, left);
+      if (Math.random() >= chance) continue;
+      this.timeouts[who] -= 1;
+      return C.to_saves * this.pace;
     }
-    if (this.timeouts[who] <= 0) return 0;
-    this.timeouts[who] -= 1;
-    return C.to_saves * this.pace;
+    return 0;
   }
 
   burnTimeout(team) {
@@ -609,9 +665,12 @@ class ScriptGame {
   }
 
   // one possession: returns [outcome, the other team's own yard line or null, seconds left]
-  possession(team, ownLine, left, overtime = 0) {
+  possession(team, ownLine, left, overtime = 0, startDown = 1, startToGo = null) {
     const L = this.L;
-    let down = 1, toGoal = 100 - ownLine, toGo = Math.min(10, toGoal);
+    let toGoal = 100 - ownLine;
+    // resume() hands in a live down and distance; every other caller enters at first and ten
+    let down = Math.min(Math.max(startDown, 1), 4);
+    let toGo = startToGo === null ? Math.min(10, toGoal) : Math.max(1, Math.min(startToGo, toGoal));
     this.off = team; this.def = 1 - team;
     while (overtime || left > 0) {
       const margin = this.score[team] - this.score[1 - team];
@@ -774,10 +833,20 @@ class ScriptGame {
     this.timeouts = [this.C ? this.C.to_per_half : 3, this.C ? this.C.to_per_half : 3];
     let [team, start] = this.receive(1 - receiving, receiving, this.score[receiving] - this.score[1 - receiving], 2 * this.halfNo + 1);
     if (this.C) left -= this.clockUsed('kickoff', 0, left);
+    this.halfFrom(team, start, left);
+  }
+
+  // What is left of a half, from a side holding the ball at its own `start` with `left` seconds on
+  // the clock. half() enters here once it has kicked off; resume() enters wherever a game in
+  // progress actually is, and that is what down and toGo are for.
+  // Mirrors Game.half_from in game_script.py.
+  halfFrom(team, start, left, down = 1, toGo = null) {
     while (left > 0) {
       if (this.C && left > this.C.to_left) { this.burnTimeout(team); this.burnTimeout(1 - team); }
-      const [outcome, next, remaining] = this.possession(team, start, left);
+      const [outcome, next, remaining] = this.possession(team, start, left, 0, down, toGo);
       left = remaining;
+      // only the possession resume() entered is under way; every one after it is a fresh drive
+      down = 1; toGo = null;
       const other = 1 - team;
       if (outcome === 'td') this.score[team] += 7;
       else if (outcome === 'fg') this.score[team] += 3;
@@ -823,7 +892,35 @@ class ScriptGame {
     const first = Math.random() < 0.5 ? 1 : 0;
     this.half(first);
     this.half(1 - first);
-    if (this.score[0] === this.score[1]) this.overtime();
+    return this.finish();
+  }
+
+  // Plays out a game already in progress. `state` is what a scoreboard shows, with the same field
+  // names Game.resume takes in game_script.py so the two stay one spec:
+  //   score [a, b], quarter 1-4, clock seconds left IN THAT QUARTER, offense 0 or 1,
+  //   own_line the offence's own yard line, down, to_go, timeouts [a, b], second_receiving.
+  // A scoreboard does not say who takes the second-half kickoff - that was settled at the coin
+  // toss - so a coin flip stands in for it when the caller does not know either.
+  resume(state) {
+    const q = state.quarter;
+    this.score = [state.score[0], state.score[1]];
+    this.halfNo = q <= 2 ? 0 : 1;
+    this.halfLength = this.C ? this.C.half : 66;
+    const perHalf = this.C ? this.C.to_per_half : 3;
+    this.timeouts = state.timeouts ? [state.timeouts[0], state.timeouts[1]] : [perHalf, perHalf];
+    // the scoreboard counts down the quarter; the simulator counts down the half
+    const left = state.clock + (q % 2 ? this.halfLength / 2 : 0);
+    this.halfFrom(state.offense, state.own_line, left, state.down ?? 1, state.to_go ?? null);
+    if (this.halfNo === 0) {
+      const recv = state.second_receiving;
+      this.half(recv === undefined || recv === null ? (Math.random() < 0.5 ? 1 : 0) : recv);
+    }
+    return this.finish();
+  }
+
+  finish() {
+    // kept so a caller can count how many finishes needed it; game_script.py returns it in the row
+    this.ot = this.score[0] === this.score[1] ? this.overtime() : 0;
     return this.score;
   }
 }
@@ -884,6 +981,7 @@ const STICKS_LONG = 0.10;
 const STICKS_CLEAR = 3;
 const GOAL_PASS_SHIFT = -0.081;      // pass log-odds inside GOAL_MAX; see game_script.py
 const GOAL_PASS_DEFENSE = 0.1218;    // per unit of -(run_d + completion_d) inside GOAL_MAX
+const PASS_TILT_DEFENSE = 0.102;   // per unit of (completion_d - run_d), everywhere; see game_script.py
 const INTERCEPTION_LOGIT = -0.038;   // interception log-odds everywhere; see game_script.py
 const GOAL_INT_LOGIT = 0.188;        // interception log-odds inside GOAL_MAX; see game_script.py
 const GOAL_COMPLETION_SHIFT = -0.075; // completion yardage normal score inside GOAL_MAX
@@ -945,5 +1043,69 @@ function scriptProjection(data, teamA, teamB, site, sims = SCRIPT_SIMS, week = u
     p,
     range: { a: [pick(homeA, 0.1), pick(homeA, 0.9)], b: [pick(awayB, 0.1), pick(awayB, 0.9)] },
     samples: { margin: margins, total: totals },      // for the matchup page's histograms
+  };
+}
+
+// ---------------------------------------------------------------- a game in progress
+//
+// The same projection from a scoreboard rather than from a kickoff: see ScriptGame.resume for the
+// state it takes. Two things are deliberately NOT the pre-game treatment.
+//
+// The win chance is the share of finishes won, not a normal fit to the margins. Before kickoff the
+// fit is the steadier estimator and the distribution is close enough to normal to earn it. A game
+// in progress is neither: with two minutes left and a three-point lead the margins pile up on a
+// few values and the distribution is lumpy and skewed, so a normal fit misreads exactly the
+// situation the view exists for. Counting is noisier - about +/-1.5 points at 1,000 finishes - and
+// unbiased, which is the right trade here.
+//
+// The swing still to be played is shrunk, not inflated. A resumed game's margin is the lead
+// already banked plus the swing to come; measured over 704 games, the lead carries through at
+// 0.985 and the swing arrives at half what was simulated, because the model has leading teams
+// going on extending a lead and real ones stop. league.live_swing is that factor - see LIVE_SWING
+// in game_script.py for the measurement and why it is 0.70 rather than 0.50.
+//
+// MARGIN_GAIN is deliberately NOT used here. It was fitted on whole games predicted from ratings
+// alone and pulls the other way; stacking it on a measured shrink would correct the same quantity
+// twice, in opposite directions, from two unrelated fits.
+function scriptLive(data, teamA, teamB, site, state, sims = SCRIPT_SIMS,
+                    conditions = undefined) {
+  const a = scriptTeam(data, teamA), b = scriptTeam(data, teamB);
+  // no clock in the payload means `left` is still a snap budget, and seconds cannot be read into it
+  if (!a || !b || !data.league || !data.league.clock) return null;
+  const home = site === 'a' ? 0 : (site === 'b' ? 1 : null);
+  const homeA = [], awayB = [], margins = [], totals = [];
+  let overtimes = 0;
+  for (let i = 0; i < sims; i++) {
+    const g = new ScriptGame(data, [a, b], home, conditions);
+    const [x, y] = g.resume(state);
+    homeA.push(x); awayB.push(y); margins.push(x - y); totals.push(x + y);
+    if (g.ot) overtimes += 1;
+  }
+  const mean = (v) => v.reduce((s, x) => s + x, 0) / v.length;
+  const sd = (v, m) => Math.sqrt(v.reduce((s, x) => s + (x - m) ** 2, 0) / v.length);
+  const pick = (v, q) => [...v].sort((p, r) => p - r)[Math.floor(q * (v.length - 1))];
+
+  const standing = state.score[0] - state.score[1];
+  // the shift moves the mean and leaves the spread, so the win chance is counted AFTER it -
+  // unlike the pre-game path, where p is taken before the gain because the gain is a margin
+  // correction fitted against ungained probabilities. Here the shrink was fitted against the
+  // win chance itself, so it belongs on the inside.
+  const swing = data.league.live_swing;
+  if (swing != null && swing !== 1) {
+    const shift = (swing - 1) * (mean(margins) - standing) / 2;
+    for (let i = 0; i < margins.length; i++) {
+      homeA[i] += shift;
+      awayB[i] -= shift;
+      margins[i] += 2 * shift;
+    }
+  }
+  const p = margins.filter((m) => m > 0).length / margins.length;
+
+  const margin = mean(margins);
+  return {
+    a: mean(homeA), b: mean(awayB), margin, total: mean(homeA) + mean(awayB),
+    p, spread: sd(margins, margin), overtime: overtimes / sims,
+    range: { a: [pick(homeA, 0.1), pick(homeA, 0.9)], b: [pick(awayB, 0.1), pick(awayB, 0.9)] },
+    samples: { margin: margins, total: totals },
   };
 }

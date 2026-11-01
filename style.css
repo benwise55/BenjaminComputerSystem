@@ -108,6 +108,21 @@ td .sub { color: var(--muted); font-size: 12px; font-weight: 400; margin-left: 4
 .probability .b { background: #8a8a93; justify-content: flex-end; }
 .compare { width: 100%; }
 
+/* the scoreboard panel on the matchup page, and what the simulator makes of it */
+#live { border: 1px solid var(--border); border-radius: 10px; padding: 10px 14px; margin: 0 0 20px; }
+#live > summary { cursor: pointer; font-size: 13px; font-weight: 600; }
+#live[open] > summary { margin-bottom: 10px; }
+.live-grid { display: flex; flex-wrap: wrap; gap: 10px 14px; align-items: end; }
+.live-grid label { display: flex; flex-direction: column; gap: 4px; color: var(--muted); font-size: 12px; }
+.live-grid select, .live-grid input { width: 96px; color: var(--text); }
+.live-grid .hint { font-size: 10px; color: var(--muted); }
+.live-out { border: 1px solid var(--accent); border-radius: 10px; padding: 12px 14px; margin: 0 0 20px; }
+.live-out h4 { margin: 0 0 8px; font-size: 13px; }
+.live-out h4 .sub { font-weight: 400; color: var(--muted); margin-left: 6px; }
+.live-out .subline.sub { font-size: 12px; }
+.live-out .headline { margin-bottom: 8px; }
+.live-out .subline:last-child { margin-bottom: 0; }
+
 /* one histogram per model, sharing an axis */
 .charts { display: flex; flex-wrap: wrap; gap: 8px 32px; margin: 0 0 20px; }
 .price { border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; margin: 0 0 20px; }

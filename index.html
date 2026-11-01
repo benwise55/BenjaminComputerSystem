@@ -70,6 +70,24 @@
           </span>
         </label>
       </div>
+      <details id="live">
+        <summary>Game in progress</summary>
+        <div class="live-grid">
+          <label>Quarter <select id="live-quarter"><option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="4">4</option></select></label>
+          <label>Clock <input id="live-clock" type="text" inputmode="numeric" placeholder="7:42" value="15:00"></label>
+          <label id="live-score-a-label">Team A <input id="live-score-a" type="number" min="0" max="99" step="1" value="0"></label>
+          <label id="live-score-b-label">Team B <input id="live-score-b" type="number" min="0" max="99" step="1" value="0"></label>
+          <label>Ball <select id="live-offense"><option value="0">Team A</option><option value="1">Team B</option></select></label>
+          <label>Own yard line <span class="hint">60 is the opponent's 40</span>
+            <input id="live-own" type="number" min="1" max="99" step="1" value="25"></label>
+          <label>Down <select id="live-down"><option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="4">4</option></select></label>
+          <label>To go <input id="live-togo" type="number" min="1" max="99" step="1" value="10"></label>
+          <label id="live-to-a-label">A timeouts <select id="live-to-a"><option value="0">0</option><option value="1">1</option><option value="2">2</option><option value="3" selected>3</option></select></label>
+          <label id="live-to-b-label">B timeouts <select id="live-to-b"><option value="0">0</option><option value="1">1</option><option value="2">2</option><option value="3" selected>3</option></select></label>
+          <label id="live-recv-label">2nd-half kickoff <span class="hint">first half only; settled at the coin toss</span>
+            <select id="live-recv"><option value="" selected>Not known</option><option value="0">Team A</option><option value="1">Team B</option></select></label>
+        </div>
+      </details>
       <div id="prediction"></div>
       <p class="note" id="predictor-note"></p>
     </section>

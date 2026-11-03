@@ -431,10 +431,13 @@ class ScriptGame {
     const goalInt = near ? GOAL_INT_LOGIT : 0;
     const goalComp = near ? GOAL_COMPLETION_SHIFT : 0;
     const [fieldShift, fieldSpread, fieldInc] = this.passFieldShift(toGoal);
-    // the fourth quarter has its own clock x lead table; everywhere else, and on a payload
-    // written before it existed, the shared closing-seconds one still applies
-    const clockPass = Math.trunc(quarter) === 4 && L.q4call ? this.q4Shift(margin, left)
-                                                            : this.endShift(left, 'pass');
+    // the fourth quarter has its own clock x lead table and the second its own clock x down
+    // one; elsewhere, and on a payload written before they existed, the shared
+    // closing-seconds table still applies
+    const q = Math.trunc(quarter);
+    const clockPass = q === 4 && L.q4call ? this.q4Shift(margin, left)
+                    : q === 2 && L.q2call ? this.q2Shift(down, left)
+                                          : this.endShift(left, 'pass');
     if (Math.random() >= passChance(L, this.mods[this.off], down, toGo, margin, quarter,
                                     this.sign(this.off), this.homeTerms, toGoal, clockPass,
                                     this.mods[this.def])) {
@@ -514,6 +517,27 @@ class ScriptGame {
     for (let k = 0; k < mb.length - 1; k++) if (margin > mb[k + 1]) i = k + 1;
     i = Math.min(i, mb.length - 2);
     // left-closed in the clock, counting up from zero
+    const x = Math.min(Math.max(left, 0), cbs[cbs.length - 1] - 1e-9);
+    let j = 0;
+    for (let k = 0; k < cbs.length - 1; k++) if (x >= cbs[k + 1]) j = k + 1;
+    j = Math.min(j, cbs.length - 2);
+    const row = t[i];
+    return (row && row[j]) ?? 0;
+  }
+
+  // The second quarter's call, by down and by seconds left in the half. It REPLACES endShift there
+  // for the same reason q4Shift does in the fourth: the hurry-up starts long before the two
+  // minutes endhalf covers. No lead axis - before halftime it is unconditional - and two down
+  // rows, because third and fourth down barely move. See Q2_CLOCK_BANDS in game_script.py. A
+  // payload written before PARAMS_VERSION 59 has no q2call and falls back to endShift, so an
+  // older script.json behaves exactly as it did.
+  q2Shift(down, left) {
+    const t = this.L.q2call;
+    const cbs = this.L.q2_clock_bands, grp = this.L.q2_down_groups;
+    if (!t || !cbs || !grp || left == null) return 0;
+    let i = grp.findIndex(g => g.includes(Math.trunc(down)));
+    if (i < 0) i = 0;
+    // left-closed in the clock, counting up from zero, as in q4Shift
     const x = Math.min(Math.max(left, 0), cbs[cbs.length - 1] - 1e-9);
     let j = 0;
     for (let k = 0; k < cbs.length - 1; k++) if (x >= cbs[k + 1]) j = k + 1;

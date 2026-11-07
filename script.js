@@ -231,19 +231,19 @@ function onsideChance(L, margin, quarter) {
 // incompletion slope.
 const TEMPERATURE = true;
 const TEMP_REFERENCE_F = 66.1;
-const TEMP_TERMS_PER_DEGREE = 0.0008;
+const TEMP_TERMS_PER_DEGREE = 0.00086;   // bumped at PARAMS_VERSION 62; see game_script.py
 const TEMP_MODELS = ['run', 'completion'];
 
 const WIND = true;
 const WIND_REFERENCE_MPH = 7.7;
 const WIND_FG_LOGIT_PER_MPH = -0.01001;   // measured on 11,164 attempts, holding kick distance
-const WIND_INCOMPLETE_PER_MPH = 0.00957;  // calibrated so the pair totals -0.1626 points a mph
+const WIND_INCOMPLETE_PER_MPH = 0.01648;  // solved off the affine line so the pair totals -0.1626
 
 const PRECIPITATION = true;
 const PRECIP_MODELS = ['run', 'completion'];
 // Calibrated by calibrate_precip() to the -2.057 combined points a wet game was fitted at; the
 // response is linear in the scale (-80.5, -82.4, -80.7 points per unit across three trials).
-const PRECIP_DEF_TERMS = 0.02536;
+const PRECIP_DEF_TERMS = 0.02973;   // bumped at PARAMS_VERSION 62; see game_script.py
 
 // TRAVEL. Door-to-door hours the visitor spent getting there, 3/5 of the effect on its defence and
 // 2/5 on its offence. Unlike the weather terms these shares DO bite, because only one side travels
@@ -560,7 +560,12 @@ class ScriptGame {
       mean = this.runoff(margin, left);
       sd = C.run_sd;
     }
-    let cost = Math.max(mean * this.pace * (1 + sd * gauss()), 1);
+    // Lognormal, mirroring _log_spread in game_script.py: a duration cannot be negative, and the
+    // old normal draw's 1-second floor replaced every clipped draw with something larger, which
+    // pushed the mean cost up by more the wider the draw was - so the spread could not be set
+    // without moving the snap level. exp(s*Z - s*s/2) has mean exactly 1 for every s.
+    const sig = Math.sqrt(Math.log1p(sd * sd));
+    let cost = mean * this.pace * Math.exp(sig * gauss() - 0.5 * sig * sig);
     // The clock stops at the end of a quarter, so a snap cannot spend time its quarter does not
     // have: a play starting with a second left in the first costs a second, not a full runoff.
     // Mirrors the cap in Game.clock_used. Overtime passes left <= 0, where a cap would ADD time.

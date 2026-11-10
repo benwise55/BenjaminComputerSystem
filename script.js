@@ -980,7 +980,7 @@ class ScriptGame {
 const MARGIN_GAIN = true;
 // refitted 2026-10-10 at PARAMS_VERSION 31, 100 sims, 9,310 FBS-vs-FBS games; see the table in
 // game_script.py. Weeks 1-2 was overcorrecting at 1.369 and weeks 3-4 undercorrecting at 1.124.
-const MARGIN_GAIN_WEEKS = [[2, 1.224], [4, 1.228], [8, 1.000], [99, 1.070]];
+const MARGIN_GAIN_WEEKS = [[2, 1.111], [4, 1.083], [8, 0.902], [99, 0.991]];
 // a stuffed short-yardage run is compressed toward the line; see SHORT_LOSS_SCALE
 // Which downs carry their own passing curve in the distance to gain, and the key each is stored
 // under in the exported league params. Second down was added when its absence showed up in the

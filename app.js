@@ -225,8 +225,9 @@ const SUCCESS_MARGIN_TERMS = { fbs: [1.38, 6.90], fcs: [0.69, 11.78], cross: [12
 // `step` - two teams from below FCS - cannot arise on this side; it is here to match the python.
 const MARGIN_RANK = { FBS: 2, FCS: 1 };
 
-// `diff` is the tier difference oriented towards `firstDivision`'s team, whether that team is at
-// home or away; the sign returned by the pairing puts the answer back in that same direction.
+// `diff` is the tier difference oriented towards `firstDivision`'s team, and the answer comes
+// back in that same direction. Across divisions it does not matter which team is named first. In
+// a same-division pairing it does: the level goes to the first team, so name the HOME side first.
 function successEloMargin(diff, firstDivision, secondDivision) {
   const f = MARGIN_RANK[firstDivision] ?? 0, s = MARGIN_RANK[secondDivision] ?? 0;
   const pairing = f === s ? (f === 2 ? 'fbs' : 'fcs') : (f === 2 || s === 2 ? 'cross' : 'step');
@@ -414,8 +415,8 @@ const WIN_STRETCH = 1.22032;       // refitted with the curve, 8,737 games, 2014
 const logOdds = (p) => Math.log(Math.min(Math.max(p, 1e-6), 1 - 1e-6) / (1 - Math.min(Math.max(p, 1e-6), 1 - 1e-6)));
 
 // The composite's win chance: the weighted mean of the models' log-odds, stretched back out to
-// where the results say it belongs. Margins are pooled plainly instead - they are points, not
-// probabilities, and nothing drags them towards the middle.
+// where the results say it belongs. The margin gets the same treatment from MARGIN_MIX_GAIN -
+// pooling it plainly, as this used to say, left it a quarter too small.
 function compositeWin(weights, parts) {
   let z = 0;
   for (const [k, w] of Object.entries(weights)) z += w * logOdds(parts[k].p);
@@ -436,6 +437,113 @@ function compositeWin(weights, parts) {
 // Applied to the MARGIN only. The Elo's win chance stays on the ungained margin, because
 // WIN_STRETCH and BLEND_CURVE were fitted against the ungained probabilities.
 const ELO_MARGIN_GAIN = 0.835;
+
+// THE COMPOSITE'S MARGIN, STRETCHED BACK OUT - the points-side twin of WIN_STRETCH.
+//
+// The win chance has always been stretched after mixing, because averaging models that agree
+// imperfectly pulls the answer toward the middle. The margin never was: it was "pooled plainly",
+// and it came out about a quarter too small. Over the 9,290 games of 2021-2026 the actual margin
+// per point this composite predicted was 1.24. The simulator on its own is the right size (0.99);
+// success Elo runs 25% small and score Elo, after ELO_MARGIN_GAIN, 21% small, and the mix inherits
+// that. It cost most where the gap between the teams is widest: the composite had the FBS side 7.6
+// points short against FCS opponents and the Power side 5.3 short against the Group of 5.
+//
+// WHY A GAIN AND NOT NEW WEIGHTS. Refitting the week curve, or letting the weights move with
+// conference play, the divisions or the tier pairing, all helped - but only by handing weight to
+// the simulator, the one model already the right size, and none of it did anything for the win
+// chance (log loss 0.5011-0.5021 against 0.5014 as shipped). Held out one season at a time,
+// margin RMSE: as shipped 16.54, best re-weighting 16.31, one gain 16.22, a gain per tier pairing
+// 16.16 - and letting every model keep its own scale by week, game type, tier and mismatch size
+// did no better than that (16.16-16.17). So the mix stays and its size is corrected.
+//
+// Fitted on 13,216 games of 2018-2026 with all three models, 2021 on at full weight and earlier
+// seasons at 0.3, as actual margin per predicted point with no intercept, jointly with
+// MARGIN_MIX_HOME below. Each gain moved by at most 0.06 across the six held-out fits. Against
+// the closing line on the 5,535 held-out games that carry one: line 15.19, composite 16.38,
+// composite with the gain 15.85.
+//
+// APPLIED TO THE MARGIN ONLY, and only when all three models voted - the gain is the size of
+// THAT mix, and a composite missing one of them is a different mix. The win chance is untouched.
+// Keys: both Power, Power against Group of 5, both Group of 5, FBS against FCS, both FCS.
+const MARGIN_MIX_GAIN = { power: 1.360, power_g5: 1.453, g5: 1.294, cross: 1.337, fcs: 1.149 };
+// The Pac-12 that took the field in 2026 is the old name on a new league, so from that season it
+// counts as Group of 5 - the same rule review_build.py's tier() applies to the games these gains
+// were fitted on.
+const POWER_CONFERENCES = ['SEC', 'Big Ten', 'Big 12', 'ACC', 'Pac-12', 'Pac-10', 'Big East'];
+const PAC12_REBUILT = 2026;
+
+function teamTier(t, season) {
+  if (division(t) !== 'FBS') return 'FCS';
+  if (t.team === 'Notre Dame') return 'Power';
+  if (t.conference === 'Pac-12' && season >= PAC12_REBUILT) return 'Group of 5';
+  return POWER_CONFERENCES.includes(t.conference) ? 'Power' : 'Group of 5';
+}
+
+// Which gain a matchup takes, from the two sides' tiers. Order does not matter.
+function mixPairing(tierA, tierB) {
+  const fcs = (tierA === 'FCS') + (tierB === 'FCS');
+  if (fcs) return fcs === 2 ? 'fcs' : 'cross';
+  const power = (tierA === 'Power') + (tierB === 'Power');
+  return power === 2 ? 'power' : (power === 1 ? 'power_g5' : 'g5');
+}
+
+// 1 unless script, success and elo all have a weight in this mix.
+function marginMixGain(a, b, weights) {
+  if (!['script', 'success', 'elo'].every((k) => weights[k] !== undefined)) return 1;
+  return MARGIN_MIX_GAIN[mixPairing(teamTier(a, state.season), teamTier(b, state.season))] ?? 1;
+}
+
+// THE HOME EDGE DOES NOT TAKE THE GAIN. The gain multiplies the whole margin, home field
+// included, and home field was never short - it was already a little long. With every
+// team-season's own level taken out, so a mis-rated host cannot pose as home field, the results
+// of 2021-2026 put FBS home field at 2.54 points; the plain mix carries 3.00 (the simulator 3.68,
+// success Elo 2.84, score Elo after its gain 2.15) and the mix times its gain 3.89. FCS is the
+// same picture one size down: 2.05, 2.44, 2.79. So the home part of the margin wants a stretch of
+// 0.85 (se 0.07, the same in both divisions) where the rest wants 1.15 to 1.45.
+//
+// It is carried as points for the home side, added after the gain, because the page cannot split
+// the simulator's margin into home field and the rest without playing every game twice. Fitted
+// jointly with the gains above, as the home edge of what the gained mix gets wrong with team
+// levels removed: -1.49 (se 0.16) between FBS teams of the same tier, between -1.41 and -1.62 in
+// the six held-out fits, and -0.68 (se 0.29) in FCS conference games. Held out one season at a
+// time the margin RMSE goes 16.163 to 16.139 (squared error -0.75, t -2.3), nearly all of it in
+// same-tier FBS games, where the home side had been 1.36 points over and is now 0.00.
+//
+// WHERE IT IS NOT APPLIED, and why. Power against Group of 5 and FBS against FCS: the stronger
+// side hosts 80% and 99.9% of those, so their gains were fitted on games where home field and the
+// gap between the teams are the same thing, and already hold it (home side -0.00 and +0.50 off).
+// A home term on top made Power-hosted games worse held out (t +1.6). FCS non-conference: the
+// host there is the better side by 12 points and is UNDER-predicted, a conference-level fault and
+// not a home-field one, and the term made those games worse (t +2.9). And a neutral field.
+//
+// AND AN FBS PAIRING THE SIMULATOR WAS NOT TOLD THE TRIP FOR. Every FBS game the term was fitted
+// on had the visitor's travel in its simulation, as all 761 FBS fixtures on the schedule do, and
+// that trip is over half of the simulator's home edge. A pairing made up on the matchup page has
+// none, so the mix carries about 2.2 points of home field there instead of 3.0 and comes out of
+// the gain near 2.9 - already close to the 2.54 - and taking 1.49 off would leave it a point
+// short. FCS games never carry a trip, here or in the fit, so their term needs no such test.
+//
+// The win chance needs none of this: at home the composite says 60.1% for FBS hosts who won
+// 59.3% (gap 0.009, se 0.007), and 59.0% against 59.1% in FCS.
+// Keys are mixPairing's; 'fcs' is read for conference games only.
+const MARGIN_MIX_HOME = { power: -1.49, g5: -1.49, fcs: -0.68 };
+
+// Two teams in the same conference. Independents share a conference NAME without sharing one.
+function sameConference(ta, tb) {
+  const c = ta.conference;
+  return Boolean(c && tb.conference === c && !/Independent/i.test(c));
+}
+
+// Points for the HOME side of a matchup, added after the gain; the caller leaves it off a
+// neutral field. 0 unless all three models voted, the same condition the gain carries.
+// `conditions` is what the simulator was given for this game (scriptConditions' shape).
+function marginMixHome(a, b, weights, conditions) {
+  if (!['script', 'success', 'elo'].every((k) => weights[k] !== undefined)) return 0;
+  const pairing = mixPairing(teamTier(a, state.season), teamTier(b, state.season));
+  if (pairing === 'fcs') return sameConference(a, b) ? MARGIN_MIX_HOME.fcs : 0;
+  const trip = conditions && Array.isArray(conditions.travel) && conditions.travel.some((h) => h);
+  return trip ? (MARGIN_MIX_HOME[pairing] ?? 0) : 0;
+}
 
 // REMOVED: the margin mix that used to price the spread - a fixed blend, 37% game script, 31%
 // success Elo, 26% score Elo, 6% EPA, fitted to minimise absolute margin error. Two findings from
@@ -549,9 +657,7 @@ const atsTooEarly = (week) => week !== null && week !== undefined && week < ATS_
 // non-conference.
 function atsKind(ta, tb) {
   if (division(ta) !== 'FBS' && division(tb) !== 'FBS') return 'fcs';
-  const c = ta.conference;
-  const shared = c && tb.conference === c && !/Independent/i.test(c);
-  return shared ? 'inconf' : 'nonconf';
+  return sameConference(ta, tb) ? 'inconf' : 'nonconf';
 }
 
 // The predicted cover for the HOME side, in points. Fitted home-relative and carrying a constant -
@@ -811,7 +917,15 @@ function showPrediction() {
   const epaP = normalCdf(epaMargin / m.margin_sd);
   const successDiff = a.success_tier - b.success_tier + side * (m.success_home_tiers ?? 0);
   const successP = tierWin(successDiff, m.randomness_factor);
-  const successMargin = successEloMargin(successDiff, division(a), division(b));
+  // Between two teams of the same division the conversion carries a level that belongs to the HOME
+  // side (1.38 points FBS, 0.69 FCS), and elo_model.py always asks from the home side. So with
+  // Team B as host it is asked from B's side and turned round; asked from A's it gave Team A the
+  // level and left the answer 2.76 points too kind to it. A neutral field keeps Team A as the
+  // listed home side, as the python and the weekly table do: the level cannot be told from zero
+  // there (listed home side +0.79 over, se 0.59, in 722 FBS neutral games).
+  const successMargin = side === -1
+    ? -successEloMargin(-successDiff, division(b), division(a))
+    : successEloMargin(successDiff, division(a), division(b));
   const eloMargin = a.elo_points - b.elo_points + side * m.elo_home_points;
   const eloSd = m.elo_points_per_tier * Math.sqrt(a.elo_off_sd ** 2 + b.elo_def_sd ** 2 + b.elo_off_sd ** 2 + a.elo_def_sd ** 2);
   const eloP = normalCdf(eloMargin / eloSd);
@@ -844,6 +958,10 @@ function showPrediction() {
   const weights = blendWeights(week, models);
   let margin = 0;                                     // points, positive = Team A wins
   for (const [k, w] of Object.entries(weights)) margin += w * models[k].margin;
+  const mixGain = marginMixGain(a, b, weights);       // see MARGIN_MIX_GAIN
+  // see MARGIN_MIX_HOME; none on a neutral field
+  const mixHome = side ? marginMixHome(a, b, weights, scheduleConditions(a.team, b.team)) : 0;
+  margin = margin * mixGain + side * mixHome;
   const pA = compositeWin(weights, models);
   const [winner, loser, p] = pA >= 0.5 ? [a, b, pA] : [b, a, 1 - pA];
   const lean = (mg, pa) => `${mg >= 0 ? a.team : b.team} by ${Math.abs(mg).toFixed(1)}, ${fmt.pct(mg >= 0 ? pa : 1 - pa)}`;
@@ -1055,6 +1173,9 @@ function showPrediction() {
     <p class="subline">${weightOrder.map(([k, w]) => `${models[k].label} (${(100 * w).toFixed(0)}%): ${lean(models[k].margin, models[k].p)}`).join(' · ')}${
       Object.keys(models).filter((k) => models[k] && !weights[k]).length
         ? `<br>Carrying no weight in week ${week}: ${Object.keys(models).filter((k) => models[k] && !weights[k]).map((k) => `${models[k].label} (${lean(models[k].margin, models[k].p)})`).join(' · ')}`
+        : ''}${mixGain !== 1
+        ? `<br>The margin is that weighted average &times; ${mixGain.toFixed(2)}: averaging models that only partly agree pulls the margin in, and this puts it back.${mixHome
+          ? ` Home field was never short, so the home side (${side === 1 ? a.team : b.team}) gives ${Math.abs(mixHome).toFixed(1)} points of it back.` : ''} The win chance has its own stretch.`
         : ''}</p>
     <p class="subline">${winner.team} wins ${fmt.pct(p)} of the time ${where}${where.endsWith('.') ? '' : '.'} Typical miss: about ${Math.round(m.margin_sd * 0.8)} points either way.</p>
     <div class="probability">
@@ -1453,6 +1574,8 @@ function showWeeklyPredictions() {
       const wts = blendWeights(g.week ?? 99, parts);
       winMargin = 0;
       for (const [k, wgt] of Object.entries(wts)) winMargin += wgt * parts[k].margin;
+      // see MARGIN_MIX_GAIN and MARGIN_MIX_HOME; `side` is 0 on a neutral field
+      winMargin = winMargin * marginMixGain(h, a, wts) + side * marginMixHome(h, a, wts, gcond);
       winP = compositeWin(wts, parts);
       winPick = winP >= 0.5 ? g.home : g.away;
       if (g.spread !== null && g.spread !== undefined && !Number.isNaN(g.spread)) {

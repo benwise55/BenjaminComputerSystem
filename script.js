@@ -751,7 +751,7 @@ class ScriptGame {
       }
 
       // WHAT THIS DOES NOT CARRY. python charges every flag to the side that gave the yards and
-      // keeps a per-side rate: the host is flagged less (home_terms.penalty), and the side that is
+      // keeps a per-side rate: the host is flagged less (by the size of its stadium), and the side that is
       // WINNING is flagged more (pen_state, a shift per margin band per quarter group per role).
       // Neither is mirrored here, and neither can be - this model has no side to charge, it only
       // moves the drive, and it keeps no per-team penalty count for either to show up in. Both are

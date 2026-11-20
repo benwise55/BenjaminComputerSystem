@@ -255,14 +255,15 @@ const PRECIP_DEF_TERMS = 0.02973;   // bumped at PARAMS_VERSION 62; see game_scr
 // and a second copy here could drift from the Python without failing loudly, so only the answer
 // crosses over. A game whose venue could not be placed carries no travel field and gets no term.
 //
-// The gradient was retargeted from 0.409 to 0.290 points an hour once the home term was fitted
-// net of travel: 0.409 came from home-field-OFF residuals and carried home advantage inside it.
-// 0.00568 is verified against the model, delivering 0.2922.
+// PARAMS_VERSION 68: loaded per channel, on what the games show - run yards and interceptions,
+// nothing on completions - and centred on the average FBS road trip, so with a host the visitor's
+// hours count from TRAVEL_CENTRE_HOURS and the home term carries the average. No travel field is an
+// average trip. See TRAVEL_PER_HOUR in game_script.py.
 const TRAVEL_HOURS = true;
 const TRAVEL_DEF_SHARE = 0.60;
 const TRAVEL_OFF_SHARE = 0.40;
-const TRAVEL_TERMS_PER_HOUR = 0.00568;
-const TRAVEL_MODELS = ['run', 'completion'];
+const TRAVEL_PER_HOUR = { run: 0.0035, interception: -0.0351 };
+const TRAVEL_CENTRE_HOURS = 5.49;
 
 // REST, as a differential and capped at 14 days. Same shape as travel: the offence is hurt by its
 // own deficit and helped by its opponent's, so two equally rested teams cancel exactly - which is
@@ -348,7 +349,8 @@ class ScriptGame {
     this.wet = (PRECIPITATION && wx.wet != null) ? wx.wet : null;
     // [hours team 0 travelled, hours team 1 travelled], already oriented to mods by the caller
     this.travel = (TRAVEL_HOURS && Array.isArray(wx.travel) && wx.travel.length === 2
-                   && wx.travel.some((h) => h)) ? wx.travel : null;
+                   && wx.travel.some((h) => h)) ? wx.travel.slice() : null;
+    if (this.travel && home !== null && home !== undefined) this.travel[1 - home] -= TRAVEL_CENTRE_HOURS;
     // [team 0 deficit, team 1 deficit] in days, already oriented to mods by the caller. Unlike
     // travel a pair of zeros is meaningful (both fully rested), but it also has no effect, so
     // gating on "some non-zero" costs nothing and skips the arithmetic.
@@ -400,9 +402,9 @@ class ScriptGame {
     }
     // the offence is hurt by its own trip and helped by its opponent's, so only the difference
     // tells and a neutral site where both sides travel needs no special case
-    if (this.travel && TRAVEL_TERMS_PER_HOUR && TRAVEL_MODELS.includes(model)) {
-      value += TRAVEL_TERMS_PER_HOUR * (TRAVEL_DEF_SHARE * this.travel[this.def]
-                                        - TRAVEL_OFF_SHARE * this.travel[this.off]);
+    if (this.travel && TRAVEL_PER_HOUR[model]) {
+      value += TRAVEL_PER_HOUR[model] * (TRAVEL_DEF_SHARE * this.travel[this.def]
+                                         - TRAVEL_OFF_SHARE * this.travel[this.off]);
     }
     if (this.rest && REST_TERMS_PER_DAY && REST_MODELS.includes(model)) {
       value += REST_TERMS_PER_DAY * (REST_DEF_SHARE * this.rest[this.def]

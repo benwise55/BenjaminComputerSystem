@@ -446,9 +446,9 @@ class ScriptGame {
       return ['run', this.atMarker(down, toGo, toGoal, this.shortLoss(toGo,
                                    this.run(this.shift('run') + this.runShift(down, toGo) + goalRun, spread)))];
     }
-    // second and third down each carry their own curve in the distance to gain - sacks roughly
-    // double from a yard to ten, completions fall, and a catch gains more. First and fourth get
-    // zeros; see DOWN_PASS_KEY in game_script.py for why first down has none.
+    // second, third and fourth down each carry their own curve in the distance to gain - sacks
+    // roughly double from a yard to ten, completions fall, and a catch gains more. First down gets
+    // zeros; see DOWN_PASS_KEY in game_script.py for why it has none.
     const [incShift, sackShift, gainShift] = this.thirdShift(down, toGo);
     const u = Math.random();
     const incomplete = logistic(logit(L.incomplete) + this.shift('incomplete') + incShift
@@ -463,7 +463,9 @@ class ScriptGame {
       // game_script.py's GAP_MODELS. Mean only - the spread stays league-wide.
       return ['sack', Math.round(L.sack_mean + this.shift('sack_yards') + gauss() * L.sack_sd)];
     }
-    return ['complete', this.atMarker(down, toGo, toGoal,
+    // the sticks nudge but not the marker band, which was solved on runs; see the completion
+    // return in Game.scrimmage_yards
+    return ['complete', this.atSticks(toGo, toGoal,
                                       this.completion(this.shift('completion') + gainShift + fieldShift + goalComp, fieldSpread))];
   }
 
@@ -571,7 +573,15 @@ class ScriptGame {
     // The clock stops at the end of a quarter, so a snap cannot spend time its quarter does not
     // have: a play starting with a second left in the first costs a second, not a full runoff.
     // Mirrors the cap in Game.clock_used. Overtime passes left <= 0, where a cap would ADD time.
-    if (left > 0) cost = Math.min(cost, left - (left > C.half / 2 ? C.half / 2 : 0));
+    // C.two_minute is the two-minute timeout (2024 on): the same cap at 2:00 of each half.
+    // clockCapped says the clock is already stopped, so no timeout hands back time - see
+    // TWO_MINUTE_FROM in game_script.py.
+    this.clockCapped = false;
+    if (left > 0) {
+      let floor = left > C.half / 2 ? C.half / 2 : 0;
+      if (C.two_minute && floor < C.two_minute && C.two_minute < left) floor = C.two_minute;
+      if (cost >= left - floor) { cost = left - floor; this.clockCapped = true; }
+    }
     return cost;
   }
 
@@ -804,7 +814,7 @@ class ScriptGame {
       }
       const scored = yards >= toGoal || yards <= -(100 - toGoal);
       left -= this.clockUsed(kind, margin, left, scored);
-      if (!scored && (!this.C || this.C.stop[kind] === undefined)) {
+      if (!scored && (!this.C || this.C.stop[kind] === undefined) && !this.clockCapped) {
         left += this.spendTimeout(team, margin, left);
       }
       const gainedFirst = yards >= toGo || auto;
@@ -987,7 +997,7 @@ const MARGIN_GAIN_WEEKS = [[2, 1.111], [4, 1.083], [8, 0.902], [99, 0.991]];
 // Which downs carry their own passing curve in the distance to gain, and the key each is stored
 // under in the exported league params. Second down was added when its absence showed up in the
 // drive count: see DOWN_PASS_KEY in game_script.py.
-const DOWN_PASS_KEY = {"2": "second", "3": "third"};
+const DOWN_PASS_KEY = {"2": "second", "3": "third", "4": "fourth"};
 const SHORT_LOSS_TO_GO = 2;
 const SHORT_LOSS_SCALE = 0.70;
 // short yardage on a late down resolves at the marker; see MARKER_MIX in game_script.py

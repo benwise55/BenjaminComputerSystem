@@ -148,6 +148,13 @@ function distributionChart(models, options = {}) {
     parts.push(`<line x1="${x(row.mean).toFixed(1)}" x2="${x(row.mean).toFixed(1)}" y1="${top}" y2="${base}" ` +
       `stroke="var(--text)" stroke-width="1.5" stroke-dasharray="3 3" opacity="0.5"/>`);
     parts.push(`<line x1="${CHART_LEFT}" x2="${CHART_WIDTH - CHART_RIGHT}" y1="${base}" y2="${base}" stroke="var(--border)" stroke-width="1"/>`);
+    // reference values the caller wants against the bars - a book's line or total
+    for (const mark of options.marks || []) {
+      if (!(mark.value >= edges[0] && mark.value <= edges[bins])) continue;
+      const mx = x(mark.value);
+      parts.push(`<line x1="${mx.toFixed(1)}" x2="${mx.toFixed(1)}" y1="${top}" y2="${base}" stroke="var(--text)" stroke-width="2"/>`);
+      if (mark.label) parts.push(`<text x="${(mx + 4).toFixed(1)}" y="${top + 10}" class="tick">${chartEscape(mark.label)}</text>`);
+    }
   });
 
   const label = options.label ? ` role="img" aria-label="${chartEscape(options.label)}"` : '';

@@ -765,6 +765,7 @@ class ScriptGame {
           if (choice === 'punt' || (choice === 'fg' && trailing > 3)) choice = (toGoal <= LAST_KICK_TO_GOAL && trailing <= 3) ? 'fg' : 'go';
         }
         if (choice === 'punt') {
+          if (this.box) this.box[team].punts++;
           const draw = this.fromBand(this.punts, toGoal);
           let spot = draw ? draw() : 30;
           left -= this.clockUsed('punt', margin, left);
@@ -774,6 +775,7 @@ class ScriptGame {
         }
         if (choice === 'fg') {
           const good = Math.random() < this.fgChance(toGoal);
+          if (this.box) this.boxKick(team, good);
           left -= this.clockUsed(good ? 'fg' : 'missed_fg', margin, left);
           if (good) return ['fg', 25, left];
           return ['missed_fg', Math.max(20, toGoal), left];
@@ -797,6 +799,7 @@ class ScriptGame {
       // real divergence; it is of the same order as the 0.26% the state table moved total points.
       if (Math.random() < this.pen.noplay) {               // the snap doesn't count
         const [net, auto] = this.drawPenalty('noplay', toGoal);
+        if (this.box) this.boxFlag(team, net, net > 0 && (net >= toGo || auto));
         // a no-play penalty replaces the snap but not the time it took; see game_script.py
         left -= this.clockUsed('penalty', margin, left);
         toGoal -= net;
@@ -805,6 +808,7 @@ class ScriptGame {
       }
 
       let [kind, yards] = this.play(down, toGo, margin, quarter, toGoal, left);
+      if (this.box) this.boxSnap(team, kind, yards, down, toGoal);
       // The clock is charged once the outcome is settled: a turnover or a score stops it, a tackle
       // in the field does not, so the turnover draws come first and each pays its own cost.
       if (kind === 'interception') {
@@ -821,6 +825,7 @@ class ScriptGame {
         if (Math.random() < logistic(fa + fk * aggression(L, down, toGo, margin, quarter)
                                      + this.shift('fumble') + (this.R['fumble_' + kind] ?? 0))) {
           left -= this.clockUsed('fumble', margin, left);
+          if (this.box) this.box[team].fumbles++;
           return Math.random() < fumbleShare ? ['fumble_td', null, left] : ['fumble', toGoal - yards, left];
         }
       }
@@ -828,6 +833,7 @@ class ScriptGame {
       // divide out the share of snaps this gate skips; see pen_add_eligible in game_script.py
       if (yards > -(100 - toGoal) && yards < toGoal && Math.random() < this.pen.add / (1 - this.pen.noplay) / (this.L.pen_add_eligible || 1)) {
         const drawn = this.drawPenalty('add', toGoal - yards);
+        if (this.box) this.boxFlag(team, drawn[0], false);
         yards += drawn[0]; auto = drawn[1];
       }
       const scored = yards >= toGoal || yards <= -(100 - toGoal);
@@ -836,6 +842,7 @@ class ScriptGame {
         left += this.spendTimeout(team, margin, left);
       }
       const gainedFirst = yards >= toGo || auto;
+      if (this.box && (gainedFirst || yards >= toGoal)) this.boxConvert(team, kind, down, yards >= toGoal);
       if (yards >= toGoal) return ['td', 25, left];
       if (yards <= -(100 - toGoal)) return ['safety', null, left];
       toGoal -= yards;
@@ -853,7 +860,9 @@ class ScriptGame {
       const trailing = this.score[1 - team] - this.score[team];
       const halftime = this.halfNo === 0;
       if ((halftime || (trailing >= 0 && trailing <= 3)) && toGoal <= LAST_KICK_TO_GOAL) {
-        if (Math.random() < this.fgChance(toGoal)) return ['fg', 25, left];
+        const good = Math.random() < this.fgChance(toGoal);
+        if (this.box) this.boxKick(team, good);
+        if (good) return ['fg', 25, left];
         return ['missed_fg', Math.max(20, toGoal), left];
       }
     }
@@ -878,6 +887,7 @@ class ScriptGame {
       const [team, start, points] = this.kickoff(kicking, receiving, margin, quarter);
       if (!points) return [team, start];
       this.score[receiving] += points;
+      if (this.box) { this.box[receiving].ret_td++; this.box[receiving][`q${Math.min(quarter, 4)}`] += points; }
       [kicking, receiving] = [receiving, kicking];
       margin = -margin;
     }
@@ -902,7 +912,9 @@ class ScriptGame {
   halfFrom(team, start, left, down = 1, toGo = null) {
     while (left > 0) {
       if (this.C && left > this.C.to_left) { this.burnTimeout(team); this.burnTimeout(1 - team); }
+      const was = this.box ? this.score.slice() : null;
       const [outcome, next, remaining] = this.possession(team, start, left, 0, down, toGo);
+      if (this.box) this.boxDrive(team, outcome, left - remaining);
       left = remaining;
       // only the possession resume() entered is under way; every one after it is a fresh drive
       down = 1; toGo = null;
@@ -911,6 +923,7 @@ class ScriptGame {
       else if (outcome === 'fg') this.score[team] += 3;
       else if (outcome === 'safety') this.score[other] += 2;
       else if (DEFENSIVE_TDS.has(outcome)) this.score[other] += 7;
+      if (this.box) this.boxPoints(was, left);
       // Nothing is added back here any more. The snap bonus after a score and the blowout burn
       // were both standing in for a clock: a score stops it and brings a kickoff, and a side
       // sitting on a lead spends clock.stall a snap against a chaser's clock.hurry, so both
@@ -979,8 +992,88 @@ class ScriptGame {
 
   finish() {
     // kept so a caller can count how many finishes needed it; game_script.py returns it in the row
+    const regulation = this.box ? this.score.slice() : null;
     this.ot = this.score[0] === this.score[1] ? this.overtime() : 0;
+    if (this.box) for (const t of [0, 1]) this.box[t].ot = this.score[t] - regulation[t];
     return this.score;
+  }
+
+  // ------------------------------------------------------------ the box score, when asked for
+  //
+  // track() turns on a per-team box score for the game analysis page. It only COUNTS: no hook
+  // draws a random number or changes a value the simulation reads, so a tracked game plays out
+  // exactly as an untracked one with the same random stream - the projection does not move.
+  //
+  // Conventions, which are this simulator's and not quite the official ones:
+  //   * rush yards exclude sacks; sacks and their yardage are their own lines (the NCAA counts a
+  //     sack as a rush), so total yards = rush + pass + sack yards
+  //   * a play's yards are the gain before any accepted penalty is added, cut at the goal lines
+  //   * a penalty is charged by the sign of its net - yards for the offence are on the defence.
+  //     This engine does not carry the per-side flag rates game_script.py has (see the note in
+  //     possession), so the split between the two teams is only the role split
+  //   * first downs count touchdowns and penalty first downs, as box scores do
+  //   * explosive plays: runs of 10+ and completions of 20+
+  //   * q1-q4 are points by the quarter the score came in; ot is overtime points
+  track() {
+    const blank = () => ({
+      rush_att: 0, rush_yds: 0, rush_td: 0, pass_att: 0, comp: 0, pass_yds: 0, pass_td: 0,
+      sacks: 0, sack_yds: 0, ints: 0, fumbles: 0, explosive: 0, plays: 0, first_downs: 0,
+      third_att: 0, third_conv: 0, fourth_att: 0, fourth_conv: 0, pen: 0, pen_yds: 0,
+      punts: 0, fg_att: 0, fg_made: 0, drives: 0, top: 0, downs: 0,
+      def_td: 0, ret_td: 0, safeties: 0, q1: 0, q2: 0, q3: 0, q4: 0, ot: 0,
+    });
+    this.box = [blank(), blank()];
+    return this;
+  }
+
+  boxSnap(team, kind, yards, down, toGoal) {
+    const b = this.box[team];
+    const gain = Math.max(Math.min(yards, toGoal), -(100 - toGoal));
+    b.plays++;
+    if (down === 3) b.third_att++;
+    if (down === 4) b.fourth_att++;
+    if (kind === 'run') { b.rush_att++; b.rush_yds += gain; if (gain >= 10) b.explosive++; }
+    else if (kind === 'sack') { b.sacks++; b.sack_yds += gain; }
+    else {
+      b.pass_att++;
+      if (kind === 'interception') b.ints++;
+      if (kind === 'complete') { b.comp++; b.pass_yds += gain; if (gain >= 20) b.explosive++; }
+    }
+  }
+
+  boxConvert(team, kind, down, touchdown) {
+    const b = this.box[team];
+    b.first_downs++;
+    if (down === 3) b.third_conv++;
+    if (down === 4) b.fourth_conv++;
+    if (touchdown && kind === 'run') b.rush_td++;
+    if (touchdown && kind === 'complete') b.pass_td++;
+  }
+
+  boxFlag(offense, net, firstDown) {
+    if (!net) return;
+    const b = this.box[net > 0 ? 1 - offense : offense];
+    b.pen++; b.pen_yds += Math.abs(net);
+    if (firstDown) this.box[offense].first_downs++;
+  }
+
+  boxKick(team, good) {
+    this.box[team].fg_att++;
+    if (good) this.box[team].fg_made++;
+  }
+
+  boxDrive(team, outcome, seconds) {
+    const b = this.box[team], o = this.box[1 - team];
+    b.drives++; b.top += seconds;
+    if (outcome === 'downs') b.downs++;
+    if (outcome === 'safety') o.safeties++;
+    if (outcome === 'int_td' || outcome === 'fumble_td') o.def_td++;
+    if (outcome === 'punt_td') o.ret_td++;
+  }
+
+  boxPoints(was, left) {
+    const q = Math.min(2 * this.halfNo + (left > this.halfLength / 2 ? 1 : 2), 4);
+    for (const t of [0, 1]) this.box[t][`q${q}`] += this.score[t] - was[t];
   }
 }
 

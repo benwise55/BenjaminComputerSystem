@@ -13,6 +13,7 @@
       <button role="tab" data-view="rankings" aria-selected="true">Rankings</button>
       <button role="tab" data-view="weekly">Predictions</button>
       <button role="tab" data-view="predictor">Matchup</button>
+      <button role="tab" data-view="analysis">Game Sim</button>
       <button role="tab" data-view="players">Players</button>
     </nav>
     <label class="season">Season <select id="season"></select></label>
@@ -94,6 +95,24 @@
       <p class="note" id="predictor-note"></p>
     </section>
 
+    <section id="analysis" class="view" hidden>
+      <div class="controls">
+        <label>Week <select id="lab-week"></select></label>
+        <select id="lab-game" aria-label="Game"></select>
+        <label>Simulations
+          <select id="lab-sims">
+            <option value="1000">1,000</option>
+            <option value="10000" selected>10,000</option>
+            <option value="25000">25,000</option>
+          </select>
+        </label>
+        <button id="lab-run" class="primary">Run</button>
+        <button id="lab-csv" class="quiet" disabled>Download CSV</button>
+      </div>
+      <p class="note" id="lab-note"></p>
+      <div id="lab-out"></div>
+    </section>
+
     <section id="players" class="view" hidden>
       <div class="controls">
         <div class="segmented" id="player-kind">
@@ -117,6 +136,7 @@
   <script src="script.js"></script>
   <script src="charts.js"></script>
   <script src="value.js"></script>
+  <script src="analysis.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

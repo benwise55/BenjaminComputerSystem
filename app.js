@@ -1193,6 +1193,7 @@ function showPrediction() {
   })();
   $('prediction').innerHTML = `
     <div class="teams">${teamCard(a, 'a')}<div class="vs">vs<br><span>${venue}</span></div>${teamCard(b, 'b')}</div>
+    ${state.script && typeof goToAnalysis === 'function' ? '<p class="lab-link"><button id="to-analysis" class="quiet">Run 10,000 simulations with box scores →</button></p>' : ''}
     ${liveBlock}
     <p class="headline">${live ? 'Before kickoff: ' : ''}${winner.team} by ${Math.abs(margin).toFixed(1)}</p>
     ${scoreLine}
@@ -1217,6 +1218,10 @@ function showPrediction() {
     </table>
     ${injuryBlock(a, b)}`;
   drawCharts();
+  $('to-analysis')?.addEventListener('click', () => {
+    $('lab-sims').value = '10000';
+    goToAnalysis(a.team, b.team, site);
+  });
   PRICE_FIELDS.forEach((id) => $(`price-${id}`)?.addEventListener('input', showPrice));
   showPrice();
   $('predictor-note').textContent = `Ratings in the table are on the rankings page's 0-100 scale, where 0 is the lowest and 100 the highest ` +
@@ -1832,12 +1837,14 @@ async function loadSeason(season) {
   showWeeklyPredictions();
   showPrediction();
   showPlayers();
+  if (!$('analysis').hidden && typeof labShow === 'function') labShow();
 }
 
 function showView(view) {
   document.querySelectorAll('nav button').forEach((b) => b.setAttribute('aria-selected', String(b.dataset.view === view)));
   document.querySelectorAll('.view').forEach((v) => { v.hidden = v.id !== view; });
   drawCharts();      // a hidden chart has no width to draw itself at, so it waits until it is shown
+  if (view === 'analysis' && typeof labShow === 'function') { labShow(); labDrawCharts(); }
   try {
     localStorage.setItem('cfb-view', view);
     history.replaceState(null, '', `#${view}`);

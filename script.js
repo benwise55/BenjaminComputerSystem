@@ -309,6 +309,10 @@ class ScriptGame {
     this.shock = shockSd ? [gauss() * shockSd, gauss() * shockSd] : null;
     // only the two fitted as a residual from a table the simulator samples; see INTERCEPT_MODELS
     // in game_script.py - the per-play models already carry their baseline and applying theirs hurt
+    // The rate offsets the python engine adds through Game.recentre - situational and team, summed
+    // by export() - so both engines run each rate off the same level. Absent in an older payload,
+    // where every offset reads as zero.
+    this.R = data.recentre || {};
     this.intercepts = {};
     for (const k of ['punt', 'kickoff']) if (data.intercepts && data.intercepts[k] != null) this.intercepts[k] = data.intercepts[k];
     this.mods = mods;                                      // [team A, team B]
@@ -449,16 +453,20 @@ class ScriptGame {
     // second, third and fourth down each carry their own curve in the distance to gain - sacks
     // roughly double from a yard to ten, completions fall, and a catch gains more. First down gets
     // zeros; see DOWN_PASS_KEY in game_script.py for why it has none.
-    const [incShift, sackShift, gainShift] = this.thirdShift(down, toGo);
+    let [incShift, sackShift, gainShift] = this.thirdShift(down, toGo);
+    // the survival-fitted cell replaces the down curve's mean-score gain when the payload has it;
+    // see _down_gain_model in game_script.py
+    let gainSpread = 0;
+    if (L.down_gain) [gainShift, gainSpread] = this.completionCell(down, toGo, toGoal);
     const u = Math.random();
-    const incomplete = logistic(logit(L.incomplete) + this.shift('incomplete') + incShift
+    const incomplete = logistic(logit(L.incomplete) + (this.R.incomplete ?? 0) + this.shift('incomplete') + incShift
                                 + fieldInc + this.windInc());
     if (u < incomplete) return ['incomplete', 0];
     const [ia, ik] = L.turnover_logit.interception;
     const intercept = logistic(ia + ik * aggression(L, down, toGo, margin, quarter) + this.shift('interception')
-                               + INTERCEPTION_LOGIT + goalInt);
+                               + INTERCEPTION_LOGIT + goalInt + (this.R.interception ?? 0));
     if (u < incomplete + intercept) return ['interception', 0];
-    if (Math.random() < logistic(logit(L.sack) + this.shift('sack') + sackShift + goalSack)) {
+    if (Math.random() < logistic(logit(L.sack) + (this.R.sack ?? 0) + this.shift('sack') + sackShift + goalSack)) {
       // the matchup moves the sack's yardage as well as its rate; see the sack_yards note in
       // game_script.py's GAP_MODELS. Mean only - the spread stays league-wide.
       return ['sack', Math.round(L.sack_mean + this.shift('sack_yards') + gauss() * L.sack_sd)];
@@ -466,7 +474,7 @@ class ScriptGame {
     // the sticks nudge but not the marker band, which was solved on runs; see the completion
     // return in Game.scrimmage_yards
     return ['complete', this.atSticks(toGo, toGoal,
-                                      this.completion(this.shift('completion') + gainShift + fieldShift + goalComp, fieldSpread))];
+                                      this.completion(this.shift('completion') + gainShift + fieldShift + goalComp, fieldSpread + gainSpread))];
   }
 
   // A run's yardage moves with the down and the distance, and the league curve on its own made
@@ -642,6 +650,16 @@ class ScriptGame {
     return [g.run[i], g.sack[i]];
   }
 
+  // Mirrors Game.completion_cell: (shift, log spread) by down, distance and zone.
+  completionCell(down, toGo, toGoal) {
+    const cell = this.L.down_gain[String(Math.min(Math.max(Math.trunc(down), 1), 4))];
+    if (!cell) return [0, 0];
+    const t = Math.min(Math.max(Math.trunc(toGo), 1), DOWN_GAIN_MAX) - 1;
+    const g = toGoal == null ? 99 : toGoal;
+    const z = g <= DOWN_GAIN_ZONES[0] ? 0 : (g <= DOWN_GAIN_ZONES[1] ? 1 : 2);
+    return [cell.shift[t][z], cell.spread[t][z]];
+  }
+
   thirdShift(down, toGo) {
     const t = this.L[DOWN_PASS_KEY[String(Math.trunc(down))]];
     if (!t) return [0, 0, 0];
@@ -735,7 +753,7 @@ class ScriptGame {
           const fromPunt = take > 0 ? Math.min(take, punt) : 0;
           punt -= fromPunt; go -= take - fromPunt; fg = now;
         }
-        const lean = this.mods[team].go ?? 0;
+        const lean = (this.mods[team].go ?? 0) + (this.R.go ?? 0);
         if (lean && go > 0 && go < 1) {
           const now = logistic(logit(go) + lean);
           punt *= (1 - now) / (1 - go); fg *= (1 - now) / (1 - go); go = now;
@@ -801,7 +819,7 @@ class ScriptGame {
         // The fumble term, which did not exist on either side until fit_teams started fitting one:
         // the rate was the league average in every matchup, here and in python alike.
         if (Math.random() < logistic(fa + fk * aggression(L, down, toGo, margin, quarter)
-                                     + this.shift('fumble'))) {
+                                     + this.shift('fumble') + (this.R['fumble_' + kind] ?? 0))) {
           left -= this.clockUsed('fumble', margin, left);
           return Math.random() < fumbleShare ? ['fumble_td', null, left] : ['fumble', toGoal - yards, left];
         }
@@ -998,6 +1016,8 @@ const MARGIN_GAIN_WEEKS = [[2, 1.111], [4, 1.083], [8, 0.902], [99, 0.991]];
 // under in the exported league params. Second down was added when its absence showed up in the
 // drive count: see DOWN_PASS_KEY in game_script.py.
 const DOWN_PASS_KEY = {"2": "second", "3": "third", "4": "fourth"};
+const DOWN_GAIN_ZONES = [20, 40];     // mirrors DOWN_GAIN_ZONES in game_script.py
+const DOWN_GAIN_MAX = 25;             // mirrors DOWN_GAIN_MAX
 const SHORT_LOSS_TO_GO = 2;
 const SHORT_LOSS_SCALE = 0.70;
 // short yardage on a late down resolves at the marker; see MARKER_MIX in game_script.py

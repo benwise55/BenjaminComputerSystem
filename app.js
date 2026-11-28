@@ -1085,7 +1085,8 @@ function showPrediction() {
           const team = high <= 0 ? a.team : b.team;
           const near = Math.min(Math.abs(low), Math.abs(high));
           const far = Math.max(Math.abs(low), Math.abs(high));
-          return `${team} by ${near}-${far}`;
+          // bins are closed away from zero (see chartHeights), so the first bar is a win by 1-7
+          return `${team} by ${near + 1}-${far}`;
         },
         label: `How often each model expects each margin of victory, ${a.team} against ${b.team}` } },
   ];

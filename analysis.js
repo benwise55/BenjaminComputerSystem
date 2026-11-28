@@ -510,13 +510,15 @@ function labDrawCharts() {
         ends: { left: { label: a, color: colors.a }, right: { label: b, color: colors.b } },
         format: (v) => Math.abs(v).toFixed(0),
         marks: line.spreadA != null ? [{ value: line.spreadA, label: 'book' }] : [],
-        describe: (low, high) => `${high <= 0 ? a : b} by ${Math.min(Math.abs(low), Math.abs(high))}-${Math.max(Math.abs(low), Math.abs(high))}`,
+        // bins are closed away from zero (see chartHeights), so the first bar is a win by 1-3
+        describe: (low, high) => `${high <= 0 ? a : b} by ${Math.min(Math.abs(low), Math.abs(high)) + 1}-${Math.max(Math.abs(low), Math.abs(high))}`,
         label: `How often each margin comes up, ${a} against ${b}` });
     } else {
       const samples = Array.from(L.cols.total);
       plot.innerHTML = distributionChart([{ label: 'Simulator', samples, mean: labMean(samples),
         sub: line.total != null ? `book ${line.total}` : '' }], {
         width, binWidth: 3, format: (v) => v.toFixed(0), unit: 'points',
+        describe: (low, high) => `${low}-${high - 1} points`,
         marks: line.total != null ? [{ value: line.total, label: 'book' }] : [],
         label: `How often each total comes up, ${a} against ${b}` });
     }

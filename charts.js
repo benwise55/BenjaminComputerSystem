@@ -40,13 +40,23 @@ function chartEdges(models, width) {
 
 // One model's share of games in each bin. Samples are counted (anything past the ends falls in
 // the end bin, which is under a percent of them); a normal gets the exact probability instead.
-function chartHeights(model, edges) {
+//
+// `symmetric` is for a chart centred on a winner (a margin): each bin is closed on the side AWAY
+// from zero, so a win by 1-3 lands in the first bar on either side. Half-open [lo, hi) bins put a
+// 3-point win for the side right of zero in the 3-6 bar while the side left of zero kept its own -
+// and 3 is football's commonest margin, so the right-hand team's closest bar came out about half
+// its true height (643 games against 1,500 in one 20,000-run check). Margins are rounded first:
+// the margin gain shifts every simulation by the same fraction of a point, which would otherwise
+// carry whole-number margins across an edge all at once.
+function chartHeights(model, edges, symmetric = false) {
   const bins = edges.length - 1;
   const out = new Array(bins).fill(0);
   if (model.samples) {
     const width = edges[1] - edges[0];
-    for (const v of model.samples) {
-      const i = Math.min(Math.max(Math.floor((v - edges[0]) / width), 0), bins - 1);
+    for (const raw of model.samples) {
+      const v = symmetric ? Math.round(raw) : raw;
+      const at = (v - edges[0]) / width;
+      const i = Math.min(Math.max(symmetric && v > 0 ? Math.ceil(at) - 1 : Math.floor(at), 0), bins - 1);
       out[i]++;
     }
     return out.map((n) => n / model.samples.length);
@@ -86,7 +96,7 @@ function distributionChart(models, options = {}) {
   const width = options.binWidth ?? 7;
   const edges = chartEdges(models, width);
   const bins = edges.length - 1;
-  const rows = models.map((m) => ({ ...m, heights: chartHeights(m, edges) }));
+  const rows = models.map((m) => ({ ...m, heights: chartHeights(m, edges, Boolean(options.zero)) }));
   // a third line in the gutter needs the row to be taller, or it would sit on the baseline
   const ROW = rows.some((r) => r.sub) ? CHART_ROW + 14 : CHART_ROW;
   const tallest = Math.max(...rows.map((r) => Math.max(...r.heights)));
